@@ -128,11 +128,29 @@ These are described fully in [achievements.md](achievements.md).
 A blank means unknown; `FALSE`/`0` means a source explicitly reported no
 achievements. Unlock percentages measure observed rarity, not difficulty.
 
-## 7. Reports
+## 7. Monthly snapshots (outside the 13-column format)
+
+These are described fully in [snapshots.md](snapshots.md).
+
+| File | Grain | Columns |
+|---|---|---|
+| `steam_game_monthly_snapshots.csv` | one row per (game, collection month) | `appid, snapshot_month, snapshot_utc, age_months, review_total, review_positive, review_negative, review_positive_share, recent_review_count, current_player_count, achievement_count, price_usd_cents, early_access_current` |
+| `steam_game_monthly_snapshots_analysis.csv` | the same grain, analysis-ready | the indicators plus `dataset, snapshot_index, months_since_previous_snapshot, review_total_change, record_complete` and a `*_status` column per indicator |
+| `steam_game_monthly_snapshots_analysis.schema.json` | — | dtype and description of every analysis column |
+| `work/snapshots/snapshot_audit.csv` | one row per source observation | `obs_id, snapshot_month, appid, source, status, url, retrieved_at, raw_json, detail, run_id` (append-only) |
+| `work/snapshots/snapshot_runs.csv` | one row per invocation | `run_id, month, scope, started_at, finished_at, requested, collected, pending, stop_reason, requests_sent` |
+
+* Only the current month can be collected, and missing months are never
+  filled in.
+* Review counts are cumulative and are not a measure of retention.
+* `current_player_count` is a single point-in-time concurrency reading.
+
+## 8. Reports
 
 | File | Contents |
 |---|---|
 | `reports/quality_report.md` | Validation checks, coverage, missingness, exclusions, failures, back-test and limitations (generated) |
 | `reports/backtest_comparison.csv` | `appid, stratum, column, legacy_value, current_value, compatible, equal, current_status, note` (one row per back-tested game and column) |
 | `reports/backtest_summary.json` | Aggregates used by the quality report |
+| `reports/snapshot_coverage.md` | Indicator availability per snapshot month (generated) |
 | `reports/achievements_coverage.md` | Achievement-data coverage per group, source statuses, count agreement (generated) |

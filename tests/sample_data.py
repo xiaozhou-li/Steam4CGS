@@ -138,13 +138,18 @@ PERCENTAGES = {
 }
 
 
+PLAYERS = {9900001: 1234, 9900002: 0, 9900004: 87}  # 9900003: Steam's {"result": 42} (no data)
+
+
 class SampleSteam(BaseAdapter):
     """Serves the synthetic payloads above for the four endpoints the extractor uses."""
 
     def __init__(self, appdetails=None, reviews=None, tags=None, tag_names=None,
                  review_params=REVIEW_METHOD_PARAMS, early_access=None, steamspy=None, catalog=None,
-                 schemas=None, percentages=None):
+                 schemas=None, percentages=None, players=None):
         super().__init__()
+        # GetNumberOfCurrentPlayers: appid -> player count (int), (status,) tuple, body dict or exception.
+        self.players = dict(PLAYERS if players is None else players)
         # ISteamUserStats fixtures: appid -> body (dict), HTTP status (int) or exception.
         self.schemas = dict(SCHEMAS if schemas is None else schemas)
         self.percentages = dict(PERCENTAGES if percentages is None else percentages)
@@ -249,6 +254,15 @@ class SampleSteam(BaseAdapter):
             if isinstance(body, int):
                 return self._respond(request, body, {})
             return self._respond(request, 200, body)
+        if url.path == "/ISteamUserStats/GetNumberOfCurrentPlayers/v1/":
+            answer = self.players.get(int(params["appid"]), {"result": 42})  # Steam's "no data" answer
+            if isinstance(answer, BaseException):
+                raise answer
+            if isinstance(answer, tuple):
+                return self._respond(request, answer[0], {})
+            if isinstance(answer, int):
+                answer = {"player_count": answer, "result": 1}
+            return self._respond(request, 200, {"response": answer})
         if url.path in ("/ISteamUserStats/GetSchemaForGame/v2/",
                         "/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/"):
             schema_call = "GetSchemaForGame" in url.path

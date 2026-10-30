@@ -56,6 +56,10 @@ def schema_for_game_request(appid: int, language: str = "english") -> tuple[str,
     return f"{WEB_API_BASE}/ISteamUserStats/GetSchemaForGame/v2/", {"appid": appid, "l": language}
 
 
+def current_players_request(appid: int) -> tuple[str, dict]:
+    return f"{WEB_API_BASE}/ISteamUserStats/GetNumberOfCurrentPlayers/v1/", {"appid": appid}
+
+
 def global_achievement_percentages_request(appid: int) -> tuple[str, dict]:
     return f"{WEB_API_BASE}/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/", {"gameid": appid}
 
@@ -116,6 +120,10 @@ class SteamWebAPI:
     @property
     def has_key(self) -> bool:
         return self._key is not None
+
+    @property
+    def transport(self) -> SteamTransport:
+        return self._transport
 
     def call(
         self,
@@ -274,6 +282,12 @@ class SteamWebAPI:
         _, params = global_achievement_percentages_request(_check_appid(appid))
         body = self.call("ISteamUserStats", "GetGlobalAchievementPercentagesForApp", 2, params, require_key=False)
         return _expect_dict(body, "GetGlobalAchievementPercentagesForApp")
+
+    def get_number_of_current_players(self, appid: int) -> dict:
+        """``ISteamUserStats/GetNumberOfCurrentPlayers/v1`` ``response`` object (no key needed)."""
+        _, params = current_players_request(_check_appid(appid))
+        return self._response(self.call("ISteamUserStats", "GetNumberOfCurrentPlayers", 1, params, require_key=False),
+                              "GetNumberOfCurrentPlayers")
 
     def get_tag_names(self, *, language: str = "english") -> dict[int, str]:
         """``IStoreService/GetTagList/v1``: tag id -> localized tag name."""

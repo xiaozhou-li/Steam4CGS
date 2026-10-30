@@ -14,6 +14,8 @@ Pipeline commands (shared workspace: --base-dir, --work-dir, --legacy-csv):
     python -m crawler quality   [--run-tests]
     python -m crawler achievements [--scope new|legacy|merged | --appid N ... | --appids-file F] [--limit N]
                                 [--refresh] [--dry-run]
+    python -m crawler snapshot  [--scope ... | --appid N ... | --appids-file F] [--month YYYY-MM] [--limit N]
+                                [--refresh] [--dry-run] [--export-only]
 
 Lower-level tools: ``extract`` and ``reviews`` (see docs/metadata.md, docs/reviews.md).
 """
@@ -31,7 +33,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from crawler import achievements, backtest, discovery, extract, pipeline, preflight, quality
+from crawler import achievements, backtest, discovery, extract, pipeline, preflight, quality, snapshots
 from crawler import reviews as rv
 from crawler import steamspy as spy
 from crawler.cache import ResponseCache
@@ -173,6 +175,23 @@ def build_parser() -> argparse.ArgumentParser:
     ach.add_argument("--refresh", action="store_true", help="re-collect games already collected")
     ach.add_argument("--dry-run", action="store_true", help="show what would happen; no requests, no writes")
 
+    snap = sub.add_parser("snapshot", help="monthly engagement snapshot (one record per game and month)")
+    _workspace_args(snap)
+    starget = snap.add_mutually_exclusive_group()
+    starget.add_argument("--scope", choices=("new", "legacy", "merged"), default="merged",
+                         help="new games, original games, or both (default: %(default)s)")
+    starget.add_argument("--appid", type=int, action="append", help="snapshot these AppIDs only")
+    starget.add_argument("--appids-file", type=Path, help="one AppID per line ('#' comments allowed)")
+    snap.add_argument("--month", help="YYYY-MM; must be the current UTC month to collect (default: current)")
+    snap.add_argument("--limit", type=_non_negative, help="maximum games collected in this invocation")
+    snap.add_argument("--refresh", action="store_true",
+                      help="re-collect this month's records (earlier observations stay in the audit trail)")
+    snap.add_argument("--dry-run", action="store_true", help="show what would happen; no requests, no writes")
+    snap.add_argument("--export-only", action="store_true", help="rewrite the exports from stored records; no requests")
+    snap.add_argument("--language", default="all", help="review-summary language setting (default: %(default)s)")
+    snap.add_argument("--purchase-type", choices=rv.PURCHASE_TYPES, default="all",
+                      help="review-summary purchase-type setting (default: %(default)s)")
+
     x = sub.add_parser("extract", help="(lower level) fetch and normalize Store metadata for AppIDs")
     src = x.add_mutually_exclusive_group()
     src.add_argument("--input", type=Path, default=DEFAULT_OUT / "eligible.csv",
@@ -250,6 +269,8 @@ def run_pipeline_command(args: argparse.Namespace, environ: Mapping[str, str],
             return run_quality(ctx, args)
         if cmd == "achievements":
             return run_achievements(ctx, args)
+        if cmd == "snapshot":
+            return run_snapshot(ctx, args)
         if cmd == "validate":
             return pipeline.run_stage(ctx, "validate", lambda: pipeline.validate(ctx))
         if cmd == "export":
@@ -453,6 +474,74 @@ def run_achievements(ctx: pipeline.Context, args: argparse.Namespace) -> int:
         return EXIT_TEMPFAIL if report.stop_reason == "rate_limited" else EXIT_OK
 
     return pipeline.run_stage(ctx, "achievements", go)
+
+
+def _target_appids(ws: pipeline.Workspace, args: argparse.Namespace, legacy_ids: frozenset[int],
+                   new_ids: list[int]) -> tuple[list[int], str]:
+    if args.appid or args.appids_file:
+        return list(args.appid or read_appids_file(args.appids_file)), "explicit AppIDs"
+    return {"new": new_ids, "legacy": sorted(legacy_ids), "merged": sorted(legacy_ids) + new_ids}[args.scope], args.scope
+
+
+def run_snapshot(ctx: pipeline.Context, args: argparse.Namespace) -> int:
+    ws = ctx.ws
+    legacy_ids = ctx.legacy_ids()
+    new_ids = _new_appids(ws, legacy_ids)
+    appids, scope = _target_appids(ws, args, legacy_ids, new_ids)
+    current = snapshots.month_of(ctx.now())
+    month = args.month or current
+    if not (len(month) == 7 and month[4] == "-" and month[:4].isdigit() and month[5:].isdigit()
+            and 1 <= int(month[5:]) <= 12):
+        raise ValueError(f"--month must be YYYY-MM, got {month!r}")
+    state_path = ws.work / "snapshots.sqlite3"
+
+    def write_exports(state) -> dict:
+        counts = snapshots.export(state, ws.base, ws.work, new_ids=new_ids, legacy_ids=legacy_ids)
+        pipeline._atomic_write_bytes(ws.base / "reports" / "snapshot_coverage.md",
+                                     snapshots.coverage_markdown(state, iso(ctx.now())).encode())
+        return counts
+
+    if args.dry_run:
+        done = set()
+        if state_path.exists():
+            with snapshots.SnapshotState(state_path) as st:
+                done = {r["appid"] for r in st.records(month) if r["complete"]}
+        todo = [a for a in appids if args.refresh or a not in done]
+        n = min(len(todo), args.limit) if args.limit is not None else len(todo)
+        note = "" if month == current else f" (refused: only the current month {current} can be collected)"
+        print(f"dry run: snapshot {month}{note}, scope {scope}: {len(appids)} game(s), {len(todo)} to collect, "
+              f"{n} this time; about 3-4 requests per game")
+        return EXIT_OK if month == current else EXIT_USAGE
+
+    def go() -> int:
+        if args.export_only:
+            with snapshots.SnapshotState(state_path) as st:
+                counts = write_exports(st)
+            print(f"export: {counts['records']} record(s) for {counts['games']} game(s), "
+                  f"{counts['observations']} audited observation(s)")
+            return EXIT_OK
+        key = ctx.key()
+        transport = ctx.get_transport()
+        settings = rv.ReviewSettings(language=args.language, purchase_type=args.purchase_type)
+        with ResponseCache(ws.appdetails_cache) as cache, snapshots.SnapshotState(state_path) as st:
+            collector = snapshots.SnapshotCollector(st, SteamWebAPI(transport, key), pipeline._store(ctx, cache),
+                                                    review_settings=settings, now=ctx.now)
+            try:
+                report = collector.run(appids, month=month, scope=scope, limit=args.limit, refresh=args.refresh)
+            finally:
+                counts = write_exports(st)
+        print(f"snapshot {month} {report.stop_reason}: {report.collected} collected, {report.pending} pending; "
+              f"{counts['records']} record(s) in {snapshots.SNAPSHOT_CSV}"
+              + (f"; reviews skipped ({report.reviews_note})" if report.collected and not report.reviews_available else ""))
+        ctx.last_summary = {"month": month, "scope": scope, "collected": report.collected, "pending": report.pending,
+                            "stop_reason": report.stop_reason, "requests_sent": transport.requests_sent}
+        return EXIT_TEMPFAIL if report.stop_reason == "rate_limited" else EXIT_OK
+
+    try:
+        return pipeline.run_stage(ctx, "snapshot", go)
+    except snapshots.SnapshotMonthError as exc:
+        print(f"error: {exc}")
+        return EXIT_USAGE
 
 
 def run_quality(ctx: pipeline.Context, args: argparse.Namespace) -> int:

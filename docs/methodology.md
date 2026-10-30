@@ -122,7 +122,7 @@ quality` at field level). The checks cover:
 * an unchanged original CSV (sha256
   `3a7b7bd5b59565440d05c543557607b498c45590ebddc3f3e7a77afe9d095be8`).
 
-**Test suite.** 731 tests, offline, with sockets blocked. They use mocked
+**Test suite.** 777 tests, offline, with sockets blocked. They use mocked
 Steam responses through a fake `requests` adapter.
 
 | Area | Files (tests) |
@@ -133,6 +133,7 @@ Steam responses through a fake `requests` adapter.
 | Stages | `test_discovery` (29), `test_extract` (14), `test_pipeline` (28), `test_backtest` (14) |
 | Failure scenarios | `test_resilience` (32): HTTP 5xx, connection errors, 429 (transient, persistent and over-long `Retry-After`), malformed JSON and HTML, wrong shapes, missing fields, and interruptions in the catalog, discovery, crawl, reviews and export. Each scenario must recover to byte-identical outputs and pass every quality check. |
 | Output checks | `test_quality` (26): each defect class is planted and must be caught |
+| Snapshots | `test_snapshots` (46): derivation, month guards (past, future, crossing midnight), idempotency, cache freshness, retries, 429s, interruption, append-only audit, analysis export dtypes |
 | Achievements | `test_achievements` (67): parsing, the unavailable-vs-zero matrix, statistics and thresholds, retries, 429s, interruption, isolation from the 13-column outputs |
 
 Planted bugs (mutation checks) were used to confirm that the key tests fail
@@ -210,7 +211,28 @@ separate files and never into the 13-column data
   because ownership without play, audience composition, playtime and
   optional or hidden achievements all lower the percentages.
 
-## 11. Reproducibility
+## 11. Longitudinal snapshots
+
+`python -m crawler snapshot` records one observation per game and UTC
+collection month ([snapshots.md](snapshots.md)).
+
+* **Point in time only.** Only the current month can be collected; a
+  missed month is never back-filled or interpolated. Observations made
+  after a month ends are never filed under it.
+* **Idempotent and audited.** Re-running within the month is idempotent,
+  and every source response is kept in an append-only audit table with its
+  URL and time.
+* **Official sources.** Review counts come from the verified official
+  `GetAppReviews` summary, and concurrent players from the official
+  `ISteamUserStats/GetNumberOfCurrentPlayers`.
+* **No recent-window count.** No official summary reports one, so
+  `recent_review_count` is left blank rather than estimated.
+* **Not retention.** Cumulative review counts and their month-to-month
+  change are **not** measures of player retention. A single concurrent-player
+  reading per month is a noisy point-in-time sample, not activity over the
+  month. Both are weak, biased proxies for longevity.
+
+## 12. Reproducibility
 
 * **Inputs.** The original CSV is pinned by its sha256. `export` refuses to
   run if it differs.

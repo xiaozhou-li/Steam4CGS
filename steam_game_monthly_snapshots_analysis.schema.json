@@ -1,0 +1,107 @@
+{
+  "file": "steam_game_monthly_snapshots_analysis.csv",
+  "grain": "one row per (appid, snapshot_month)",
+  "read_with": "pandas.read_csv('steam_game_monthly_snapshots_analysis.csv', dtype=..., parse_dates=['snapshot_utc'])",
+  "columns": {
+    "appid": {
+      "dtype": "Int64",
+      "description": "Steam AppID"
+    },
+    "snapshot_month": {
+      "dtype": "string",
+      "description": "Collection month, YYYY-MM (UTC)"
+    },
+    "snapshot_utc": {
+      "dtype": "datetime64[ns, UTC]",
+      "description": "Latest source retrieval time of this record"
+    },
+    "dataset": {
+      "dtype": "string",
+      "description": "'new' (steamproducts2020_2026_new.csv), 'legacy' (steamproducts2020.csv) or 'other'"
+    },
+    "snapshot_index": {
+      "dtype": "Int64",
+      "description": "0 for the game's first snapshot, then 1, 2, ... (missing months are not filled in)"
+    },
+    "months_since_previous_snapshot": {
+      "dtype": "Int64",
+      "description": "Calendar months since the game's previous snapshot; blank for the first"
+    },
+    "age_months": {
+      "dtype": "Int64",
+      "description": "Whole months since the exact store release date at snapshot time"
+    },
+    "review_total": {
+      "dtype": "Int64",
+      "description": "Cumulative review count (verified GetAppReviews summary)"
+    },
+    "review_positive": {
+      "dtype": "Int64",
+      "description": "Cumulative positive reviews"
+    },
+    "review_negative": {
+      "dtype": "Int64",
+      "description": "Cumulative negative reviews"
+    },
+    "review_positive_share": {
+      "dtype": "float64",
+      "description": "review_positive / review_total"
+    },
+    "review_total_change": {
+      "dtype": "Int64",
+      "description": "Net change in cumulative review_total since the previous snapshot; not new players and not retention"
+    },
+    "recent_review_count": {
+      "dtype": "Int64",
+      "description": "Always blank: no official summary method reports it"
+    },
+    "current_player_count": {
+      "dtype": "Int64",
+      "description": "Concurrent players at the moment of the request (GetNumberOfCurrentPlayers)"
+    },
+    "achievement_count": {
+      "dtype": "Int64",
+      "description": "Store achievement total (appdetails)"
+    },
+    "price_usd_cents": {
+      "dtype": "Int64",
+      "description": "Regular US listing price in cents; 0 = free; sale prices excluded"
+    },
+    "early_access_current": {
+      "dtype": "boolean",
+      "description": "In Early Access at snapshot time: true/false; blank = unknown"
+    },
+    "record_complete": {
+      "dtype": "boolean",
+      "description": "false when a source failed this month (fields stay blank)"
+    },
+    "age_months_status": {
+      "dtype": "string",
+      "description": "Status of age_months"
+    },
+    "reviews_status": {
+      "dtype": "string",
+      "description": "Status of the review fields"
+    },
+    "recent_review_count_status": {
+      "dtype": "string",
+      "description": "Always not_available"
+    },
+    "current_player_count_status": {
+      "dtype": "string",
+      "description": "Status of current_player_count"
+    },
+    "achievement_count_status": {
+      "dtype": "string",
+      "description": "Status of achievement_count"
+    },
+    "price_usd_cents_status": {
+      "dtype": "string",
+      "description": "Status of price_usd_cents"
+    },
+    "early_access_current_status": {
+      "dtype": "string",
+      "description": "Status of early_access_current"
+    }
+  }
+}
