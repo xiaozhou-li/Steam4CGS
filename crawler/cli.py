@@ -3,6 +3,8 @@
     python -m crawler preflight [--live] [--appid N]
     python -m crawler discover  [--start DATE] [--end DATE] [--limit N] [--incremental]
                                 [--resume | --restart] [--recheck-unreleased] [--state PATH] [--out DIR]
+    python -m crawler extract   [--input eligible.csv | --appid N ...] [--limit N] [--refresh]
+                                [--state PATH] [--out DIR]
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from crawler import discovery, preflight
+from crawler import discovery, extract, preflight
 from crawler.credentials import MissingCredentialError, InvalidCredentialError, load_api_key
 from crawler.discovery_state import DiscoveryState
 from crawler.eligibility import DateWindow
@@ -24,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STATE = ROOT / "data" / "discovery" / "state.sqlite3"
 DEFAULT_OUT = ROOT / "data" / "discovery"
 DEFAULT_LEGACY_CSV = ROOT / "steamproducts2020.csv"
+DEFAULT_METADATA_STATE = ROOT / "data" / "metadata" / "state.sqlite3"
+DEFAULT_METADATA_OUT = ROOT / "data" / "metadata"
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_TEMPFAIL, EXIT_INTERRUPTED = 0, 1, 2, 75, 130
 
@@ -67,7 +71,59 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--state", type=Path, default=DEFAULT_STATE, help="SQLite checkpoint file")
     d.add_argument("--out", type=Path, default=DEFAULT_OUT, help="directory for the exported CSV files")
     d.add_argument("--legacy-csv", type=Path, default=DEFAULT_LEGACY_CSV, help="original dataset (read-only)")
+
+    x = sub.add_parser("extract", help="fetch and normalize Store metadata for eligible AppIDs")
+    src = x.add_mutually_exclusive_group()
+    src.add_argument("--input", type=Path, default=DEFAULT_OUT / "eligible.csv",
+                     help="eligible.csv from discovery (default: %(default)s)")
+    src.add_argument("--appid", type=int, action="append", help="extract specific AppID(s) instead of --input")
+    x.add_argument("--limit", type=_non_negative, help="maximum AppIDs to fetch in this invocation")
+    x.add_argument("--refresh", action="store_true", help="re-fetch AppIDs that were already extracted")
+    x.add_argument("--state", type=Path, default=DEFAULT_METADATA_STATE, help="SQLite checkpoint file")
+    x.add_argument("--out", type=Path, default=DEFAULT_METADATA_OUT,
+                   help="directory for games.csv, provenance.csv and failed.csv")
+    x.add_argument("--legacy-csv", type=Path, default=DEFAULT_LEGACY_CSV, help="original dataset (read-only)")
     return parser
+
+
+def run_extract(args: argparse.Namespace, environ: Mapping[str, str], transport: SteamTransport | None = None) -> int:
+    if args.appid:
+        if any(a <= 0 for a in args.appid):
+            print("error: --appid must be positive")
+            return EXIT_USAGE
+        appids = args.appid
+    else:
+        try:
+            appids = extract.read_eligible_appids(args.input)
+        except (OSError, ValueError) as exc:
+            print(f"error: cannot read {args.input}: {exc}")
+            return EXIT_USAGE
+    try:
+        key = load_api_key(environ, required=False)  # tag endpoints are sent the key only if one is set
+    except InvalidCredentialError as exc:
+        print(f"error: {exc}")
+        return EXIT_ERROR
+    legacy_ids = discovery.load_legacy_appids(args.legacy_csv)
+    transport = transport or SteamTransport()
+    code = EXIT_OK
+    with transport, extract.ExtractionState(args.state) as state:
+        extractor = extract.Extractor(state, web=SteamWebAPI(transport, key), store=SteamStoreAPI(transport),
+                                      legacy_ids=legacy_ids)
+        report = None
+        try:
+            report = extractor.run(appids, limit=args.limit, refresh=args.refresh)
+            if report.stop_reason == "rate_limited":
+                code = EXIT_TEMPFAIL
+        except KeyboardInterrupt:
+            print("interrupted; progress is checkpointed")
+            code = EXIT_INTERRUPTED
+        counts = extract.export(state, args.out)
+        print(f"exported to {args.out}: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+        if report is not None:
+            print(f"{report.stop_reason}: {report.attempted} fetched, {report.extracted} complete, "
+                  f"{report.partial} partial, {report.failed} failed, {report.pending} pending, "
+                  f"{len(report.skipped_legacy)} legacy skipped")
+    return code
 
 
 def run_discover(args: argparse.Namespace, environ: Mapping[str, str], transport: SteamTransport | None = None) -> int:
@@ -135,4 +191,6 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         if args.page_size < 1:
             parser.error("--page-size must be positive")
         return run_discover(args, environ)
+    if args.command == "extract":
+        return run_extract(args, environ)
     return EXIT_USAGE

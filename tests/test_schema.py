@@ -63,7 +63,20 @@ def test_nullable_columns_accept_empty(column):
     row = make_row(**{column: ""})
     if column == "genres":
         row["early_access"] = "FALSE"  # keep the cross-field rule satisfied
+    if column == "early_access":
+        row["genres"] = ""  # unverified early access requires missing genres
     assert errors(row) == []
+
+
+def test_new_data_nullable_columns_round_trip_as_none():
+    row = make_row(developer="", specs="", price="", early_access="", genres="")
+    record = GameRecord.from_row(row)
+    assert (record.developer, record.specs, record.price, record.early_access) == (None, None, None, None)
+    assert record.to_row() == row
+
+
+def test_blank_early_access_requires_blank_genres():
+    assert [c for c, _ in errors(make_row(early_access=""))] == ["early_access"]
 
 
 def test_cells_must_not_contain_line_breaks():
@@ -83,7 +96,7 @@ def test_price_accepts_whole_units(cell):
     assert errors(make_row(price=cell)) == []
 
 
-@pytest.mark.parametrize("cell", ["39.99", "$40", "040", "-1", "", "40.0"])
+@pytest.mark.parametrize("cell", ["39.99", "$40", "040", "-1", "40.0"])
 def test_price_rejects_non_integer(cell):
     assert errors(make_row(price=cell))
 

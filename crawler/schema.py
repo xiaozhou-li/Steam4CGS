@@ -50,9 +50,10 @@ LINE_TERMINATOR = "\r\n"
 UTF8_BOM = b"\xef\xbb\xbf"
 
 # Required columns never have an empty cell; the rest use "" for missing.
-REQUIRED_COLUMNS: frozenset[str] = frozenset(
-    {"id", "title", "developer", "release_date", "app_name", "specs", "price", "early_access"}
-)
+# developer, specs, price and early_access are never empty in the legacy file,
+# but new rows leave them blank rather than invent a value when the store
+# omits them (see docs/metadata.md); missingness is recorded in provenance.
+REQUIRED_COLUMNS: frozenset[str] = frozenset({"id", "title", "release_date", "app_name"})
 NULLABLE_COLUMNS: frozenset[str] = frozenset(COLUMNS) - REQUIRED_COLUMNS
 
 # --------------------------------------------------------------------------
@@ -281,6 +282,18 @@ def _decode_id(cell: str) -> int:
     return value
 
 
+def _optional_text(cell: str) -> str | None:
+    return cell or None
+
+
+def _decode_optional_bool(cell: str) -> bool | None:
+    return None if cell == "" else decode_bool(cell)
+
+
+def _decode_price(cell: str) -> int | None:
+    return None if cell == "" else decode_uint(cell)
+
+
 def _decode_publisher(cell: str) -> str | None:
     if cell == "":
         return None
@@ -302,9 +315,10 @@ def _decode_genres(cell: str) -> list[str] | None:
     return values
 
 
-def _decode_specs(cell: str) -> list[str]:
-    values = decode_list(_require_text(cell))
-    assert values is not None
+def _decode_specs(cell: str) -> list[str] | None:
+    values = decode_list(cell)
+    if values is None:
+        return None
     core = values
     if "" in values:
         # Only the legacy [..., NOTICE, '', ''] tail may contain empty strings.
@@ -330,15 +344,15 @@ DECODERS = {
     "id": _decode_id,
     "title": _require_text,
     "genres": _decode_genres,
-    "developer": _require_text,
+    "developer": _optional_text,
     "publisher": _decode_publisher,
     "release_date": decode_release_date,
     "app_name": _require_text,
     "specs": _decode_specs,
     "tags": _decode_tags,
-    "price": decode_uint,
+    "price": _decode_price,
     "sentiment": decode_sentiment,
-    "early_access": decode_bool,
+    "early_access": _decode_optional_bool,
     "metascore": decode_metascore,
 }
 assert tuple(DECODERS) == COLUMNS
@@ -356,15 +370,15 @@ class GameRecord:
     id: int
     title: str
     genres: tuple[str, ...] | None
-    developer: str
+    developer: str | None
     publisher: str | None
     release_date: str
     app_name: str
-    specs: tuple[str, ...]
+    specs: tuple[str, ...] | None
     tags: tuple[str, ...] | None
-    price: int
+    price: int | None
     sentiment: str | None
-    early_access: bool
+    early_access: bool | None
     metascore: int | None
 
     @property
@@ -376,15 +390,15 @@ class GameRecord:
             "id": encode_uint(self.id),
             "title": self.title,
             "genres": encode_list(self.genres),
-            "developer": self.developer,
+            "developer": self.developer or "",
             "publisher": self.publisher or "",
             "release_date": encode_release_date(self.release_date),
             "app_name": self.app_name,
             "specs": encode_list(self.specs),
             "tags": encode_list(self.tags),
-            "price": encode_uint(self.price),
+            "price": "" if self.price is None else encode_uint(self.price),
             "sentiment": encode_sentiment(self.sentiment),
-            "early_access": encode_bool(self.early_access),
+            "early_access": "" if self.early_access is None else encode_bool(self.early_access),
             "metascore": encode_metascore(self.metascore),
         }
         violations = validate_row(row)
@@ -458,7 +472,11 @@ def validate_row(row: Mapping[str, str], row_number: int | None = None) -> list[
             out.append(Violation("title must equal html.escape(app_name, quote=False)", row_number, "title"))
     if "early_access" in decoded and "genres" in decoded:
         in_genres = EARLY_ACCESS_GENRE in (decoded["genres"] or ())
-        if decoded["early_access"] != in_genres:
+        if decoded["early_access"] is None:
+            # Blank means unverified, which is only possible when the genres evidence is missing.
+            if decoded["genres"] is not None:
+                out.append(Violation("early_access may be blank only when genres is blank", row_number, "early_access"))
+        elif decoded["early_access"] != in_genres:
             out.append(
                 Violation(f"early_access must be TRUE exactly when genres contains {EARLY_ACCESS_GENRE!r}",
                           row_number, "early_access")

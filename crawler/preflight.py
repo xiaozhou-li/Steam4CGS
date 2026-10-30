@@ -23,7 +23,7 @@ from crawler.transport import RetryPolicy, SteamError, SteamTransport
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
 
 DEFAULT_LIVE_APPID = 620  # Portal 2: long-lived, has reviews and full store data
-LIVE_MAX_REQUESTS = 6
+LIVE_MAX_REQUESTS = 9
 LIVE_RETRY = RetryPolicy(max_attempts=2, backoff_base=2.0)
 
 REQUIRED_METHODS = (
@@ -117,8 +117,24 @@ def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> li
         data = store.get_app_details(appid)
         if data is None:
             return CheckResult("store appdetails", WARN, f"appid {appid}: success=false")
+        po = data.get("price_overview") or {}
         return CheckResult("store appdetails", OK,
-                           f"appid {appid}: type={data.get('type')!r}, name={data.get('name')!r}, {len(data)} fields")
+                           f"appid {appid}: type={data.get('type')!r}, name={data.get('name')!r}, "
+                           f"release_date={(data.get('release_date') or {}).get('date')!r}, "
+                           f"currency={po.get('currency')!r}, {len(data)} fields")
+
+    def review_summary() -> CheckResult:
+        s = store.get_review_summary(appid)
+        return CheckResult("store appreviews summary", OK,
+                           f"appid {appid}: review_score_desc={s.get('review_score_desc')!r}, "
+                           f"total_reviews={s.get('total_reviews')}")
+
+    def tags() -> CheckResult:
+        ids = web.get_store_item_tags(appid)
+        names = web.get_tag_names()
+        first = [names.get(t, f"?{t}") for t in (ids or [])[:5]]
+        return CheckResult("IStoreBrowseService/GetItems + IStoreService/GetTagList", OK if ids and names else WARN,
+                           f"appid {appid}: {len(ids or [])} tag id(s), {len(names)} tag name(s); first {first}")
 
     attempt("GetSupportedAPIList", supported)
 
@@ -134,6 +150,8 @@ def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> li
         attempt("IUserReviewsService/GetAppReviews/v1", reviews)
 
     attempt("store appdetails", details)
+    attempt("store appreviews summary", review_summary)
+    attempt("IStoreBrowseService/GetItems + IStoreService/GetTagList", tags)
     return results
 
 

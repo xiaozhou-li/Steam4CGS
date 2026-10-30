@@ -14,7 +14,6 @@ import csv
 import datetime as dt
 import json
 import os
-import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -262,16 +261,17 @@ def decide_all(state: DiscoveryState, window: DateWindow, legacy_ids: frozenset[
         yield app, decision, stored, failure
 
 
-def _write_csv(path: Path, fields: Sequence[str], rows: Iterable[dict]) -> None:
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def write_csv_atomic(path: Path, fields: Sequence[str], rows: Iterable[dict]) -> None:
+    """Write a CRLF CSV via a sibling temp file and an atomic rename."""
+    tmp = path.with_name(f".{path.name}.tmp")
     try:
-        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fields, lineterminator="\r\n")
             writer.writeheader()
             writer.writerows(rows)
         os.replace(tmp, path)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise
 
 
@@ -318,10 +318,10 @@ def export(state: DiscoveryState, out_dir: str | Path, run: Run, legacy_ids: fro
                 "detail": failure.detail, "attempts": failure.attempts, "last_attempt_at": failure.last_attempt_at,
             })
 
-    _write_csv(out / "discovered.csv", DISCOVERED_FIELDS, discovered)
-    _write_csv(out / "eligible.csv", ELIGIBLE_FIELDS, eligible)
-    _write_csv(out / "excluded.csv", EXCLUDED_FIELDS, excluded)
-    _write_csv(out / "failed.csv", FAILED_FIELDS, failed)
+    write_csv_atomic(out / "discovered.csv", DISCOVERED_FIELDS, discovered)
+    write_csv_atomic(out / "eligible.csv", ELIGIBLE_FIELDS, eligible)
+    write_csv_atomic(out / "excluded.csv", EXCLUDED_FIELDS, excluded)
+    write_csv_atomic(out / "failed.csv", FAILED_FIELDS, failed)
 
     summary = {
         "generated_at": iso(now or dt.datetime.now(dt.timezone.utc)),

@@ -44,7 +44,7 @@ rejects any host outside the allowlist.
 | Backoff | Exponential (1, 2, 4 … s, capped at 60 s) with jitter |
 | `Retry-After` | Honoured, in seconds or as an HTTP date. If the server asks for more than 300 s, the client raises instead of waiting. |
 | Rate limiting | Minimum interval per host: 1.0 s for `api.steampowered.com`, 1.5 s for `store.steampowered.com`. Thread-safe. A 429 or 5xx pushes back every caller using that host. |
-| Request budget | Optional `max_requests`, counting retries. Preflight uses 6. |
+| Request budget | Optional `max_requests`, counting retries. Preflight uses 9. |
 | Not retried | 401/403 (raised as `SteamAuthError` on keyed calls), other 4xx, 3xx, non-JSON bodies |
 
 The error hierarchy is `SteamError`, with these subclasses:
@@ -93,7 +93,7 @@ reported to throttle at around 200 requests per 5 minutes, either with HTTP
 
 ```sh
 python -m crawler preflight          # offline: Python, requests, STEAM_API_KEY format, legacy-key warning
-python -m crawler preflight --live   # plus at most 6 requests, one app id (default 620)
+python -m crawler preflight --live   # plus at most 9 requests, one app id (default 620)
 ```
 
 Live checks run only with `--live`. They make one capability check, one

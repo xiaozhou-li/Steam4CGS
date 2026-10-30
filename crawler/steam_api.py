@@ -11,9 +11,11 @@ The key is sent only to that host; the Store client never receives it.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlencode
 
 from crawler.credentials import ApiKey, MissingCredentialError
 from crawler.transport import SteamResponseError, SteamTransport
@@ -22,6 +24,37 @@ WEB_API_BASE = "https://api.steampowered.com"
 STORE_BASE = "https://store.steampowered.com"
 
 APP_LIST_MAX_RESULTS = 50_000
+MAX_TAGS = 20  # the store page shows at most 20 user tags; the legacy CSV never exceeds 20
+
+
+def public_url(url: str, params: Mapping[str, Any] | None = None) -> str:
+    """The request URL as recorded in provenance: never includes the API key."""
+    query = {k: v for k, v in (params or {}).items() if k != "key" and v is not None}
+    return f"{url}?{urlencode(query)}" if query else url
+
+
+def appdetails_request(appid: int, country: str, language: str) -> tuple[str, dict]:
+    return f"{STORE_BASE}/api/appdetails", {"appids": appid, "cc": country, "l": language}
+
+
+def review_summary_request(appid: int) -> tuple[str, dict]:
+    # num_per_page=0 returns only query_summary; language/purchase_type=all is the store's "All Reviews".
+    return f"{STORE_BASE}/appreviews/{appid}", {
+        "json": 1, "language": "all", "purchase_type": "all", "review_type": "all", "num_per_page": 0,
+    }
+
+
+def store_items_request(appid: int, country: str, language: str, tag_count: int = MAX_TAGS) -> tuple[str, dict]:
+    payload = {
+        "ids": [{"appid": appid}],
+        "context": {"language": language, "country_code": country.upper(), "steam_realm": 1},
+        "data_request": {"include_tag_count": tag_count},
+    }
+    return f"{WEB_API_BASE}/IStoreBrowseService/GetItems/v1/", {"input_json": json.dumps(payload, separators=(",", ":"))}
+
+
+def tag_list_request(language: str) -> tuple[str, dict]:
+    return f"{WEB_API_BASE}/IStoreService/GetTagList/v1/", {"language": language}
 
 
 def _param(value: Any) -> Any:
@@ -204,6 +237,45 @@ class SteamWebAPI:
         )
         return self._response(body, "GetAppReviews")
 
+    # -- tags ----------------------------------------------------------------------
+
+    def get_store_item_tags(self, appid: int, *, country: str = "us", language: str = "english") -> list[int] | None:
+        """User-tag ids for one app from ``IStoreBrowseService/GetItems/v1``, most-voted first.
+
+        Returns ``None`` when Steam has no visible store item for the app, and
+        ``[]`` when the item exists but has no tags.
+        """
+        _, params = store_items_request(_check_appid(appid), country, language)
+        response = self._response(
+            self.call("IStoreBrowseService", "GetItems", 1, params, require_key=False), "GetItems")
+        items = response.get("store_items", [])
+        if not isinstance(items, list):
+            raise SteamResponseError("GetItems 'store_items': expected a list")
+        item = next((i for i in items if isinstance(i, dict) and i.get("appid", i.get("id")) == appid), None)
+        if item is None or item.get("success", 1) != 1:
+            return None
+        weighted = item.get("tags")
+        if isinstance(weighted, list) and weighted:
+            pairs = [(t.get("tagid"), t.get("weight", 0)) for t in weighted if isinstance(t, dict)]
+            if not all(isinstance(tid, int) and isinstance(w, int) for tid, w in pairs):
+                raise SteamResponseError("GetItems 'tags': expected {tagid:int, weight:int} objects")
+            # Stable sort keeps Steam's order for equal weights.
+            return [tid for tid, _ in sorted(pairs, key=lambda p: -p[1])]
+        tagids = item.get("tagids", [])
+        if not isinstance(tagids, list) or not all(isinstance(t, int) for t in tagids):
+            raise SteamResponseError("GetItems 'tagids': expected a list of int")
+        return list(tagids)
+
+    def get_tag_names(self, *, language: str = "english") -> dict[int, str]:
+        """``IStoreService/GetTagList/v1``: tag id -> localized tag name."""
+        _, params = tag_list_request(language)
+        response = self._response(self.call("IStoreService", "GetTagList", 1, params, require_key=False), "GetTagList")
+        tags = response.get("tags", [])
+        if not isinstance(tags, list):
+            raise SteamResponseError("GetTagList 'tags': expected a list")
+        return {t["tagid"]: t["name"] for t in tags
+                if isinstance(t, dict) and isinstance(t.get("tagid"), int) and isinstance(t.get("name"), str)}
+
 
 # --------------------------------------------------------------------------
 # Steam Store (undocumented)
@@ -227,11 +299,8 @@ class SteamStoreAPI:
     def get_app_details(self, appid: int, *, country: str | None = None, language: str | None = None) -> dict | None:
         """Return the ``data`` object for one app, or ``None`` when Steam reports ``success: false``
         (unknown, removed or region-locked app)."""
-        appid = _check_appid(appid)
-        body = self._transport.get_json(
-            f"{STORE_BASE}/api/appdetails",
-            {"appids": appid, "cc": country or self.country, "l": language or self.language},
-        )
+        url, params = appdetails_request(_check_appid(appid), country or self.country, language or self.language)
+        body = self._transport.get_json(url, params)
         if body is None:
             raise SteamResponseError("appdetails returned null (this often indicates throttling)")
         entry = _expect_dict(_expect_dict(body, "appdetails").get(str(appid)), f"appdetails[{appid}]")
@@ -241,3 +310,15 @@ class SteamStoreAPI:
         if success is not True:
             raise SteamResponseError(f"appdetails[{appid}] has no boolean 'success'")
         return _expect_dict(entry.get("data"), f"appdetails[{appid}] 'data'")
+
+    def get_review_summary(self, appid: int) -> dict:
+        """``query_summary`` from ``/appreviews/<appid>?json=1&num_per_page=0`` (undocumented).
+
+        Its ``review_score_desc`` is the store's review label, e.g.
+        ``'Very Positive'``, ``'3 user reviews'`` or ``'No user reviews'``.
+        """
+        url, params = review_summary_request(_check_appid(appid))
+        body = _expect_dict(self._transport.get_json(url, params), f"appreviews[{appid}]")
+        if body.get("success") != 1:
+            raise SteamResponseError(f"appreviews[{appid}] reported success={body.get('success')!r}")
+        return _expect_dict(body.get("query_summary"), f"appreviews[{appid}] 'query_summary'")

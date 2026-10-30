@@ -67,9 +67,12 @@ A missing value is always the **empty cell** `""`. The file never uses `NaN`,
 example a publisher literally named `None`), they are real data.
 
 "Required" reflects what the legacy file shows: no empty cell in all 23,034
-rows. `crawler/schema.py` enforces it through `REQUIRED_COLUMNS`. If new
-crawls show that Steam can omit one of these values (for example a game with
-no listed developer), relax the rule deliberately in that one place.
+rows. For new data, `crawler/schema.py` (`REQUIRED_COLUMNS`) requires only
+`id`, `title`, `release_date` and `app_name`. `developer`, `specs`, `price`
+and `early_access` may be blank when the store does not provide them, rather
+than holding an invented value. `early_access` may be blank only when
+`genres` is blank, because genres are the evidence for it. The missingness
+is recorded in the provenance dataset (see `docs/metadata.md`).
 
 ## 3. Representations
 
