@@ -1,10 +1,11 @@
 """Command-line entry point.
 
-    python -m crawler preflight [--live] [--appid N]
+    python -m crawler preflight [--live [--steamspy]] [--appid N]
     python -m crawler discover  [--start DATE] [--end DATE] [--limit N] [--incremental]
                                 [--resume | --restart] [--recheck-unreleased] [--state PATH] [--out DIR]
     python -m crawler extract   [--input eligible.csv | --appid N ...] [--limit N] [--refresh]
                                 [--state PATH] [--out DIR] [--reviews-state PATH]
+                                [--tags-source steam|steamspy] [--steamspy-cache PATH] [--steamspy-ttl-hours H]
     python -m crawler reviews   [--input eligible.csv | --appid N ...] [--limit N] [--refresh]
                                 [--language all] [--purchase-type all] [--state PATH] [--out DIR]
 """
@@ -19,6 +20,8 @@ from pathlib import Path
 
 from crawler import discovery, extract, preflight
 from crawler import reviews as rv
+from crawler import steamspy as spy
+from crawler.metadata import TAG_SOURCES, TAGS_STEAM, TAGS_STEAMSPY
 from crawler.credentials import MissingCredentialError, InvalidCredentialError, load_api_key
 from crawler.discovery_state import DiscoveryState
 from crawler.eligibility import DateWindow
@@ -32,6 +35,7 @@ DEFAULT_LEGACY_CSV = ROOT / "steamproducts2020.csv"
 DEFAULT_METADATA_STATE = ROOT / "data" / "metadata" / "state.sqlite3"
 DEFAULT_METADATA_OUT = ROOT / "data" / "metadata"
 DEFAULT_REVIEWS_STATE = ROOT / "data" / "reviews" / "state.sqlite3"
+DEFAULT_STEAMSPY_CACHE = ROOT / "data" / "steamspy" / "cache.sqlite3"
 DEFAULT_REVIEWS_OUT = ROOT / "data" / "reviews"
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_TEMPFAIL, EXIT_INTERRUPTED = 0, 1, 2, 75, 130
@@ -58,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("preflight", help="check configuration; optionally make a few live API calls")
     p.add_argument("--live", action="store_true",
                    help=f"make at most {preflight.LIVE_MAX_REQUESTS} real requests to Steam (one app id)")
+    p.add_argument("--steamspy", action="store_true", help="with --live, also make one SteamSpy request")
     p.add_argument("--appid", type=int, default=preflight.DEFAULT_LIVE_APPID,
                    help="app id for the live reviews/appdetails checks (default: %(default)s)")
 
@@ -90,6 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--legacy-csv", type=Path, default=DEFAULT_LEGACY_CSV, help="original dataset (read-only)")
     x.add_argument("--reviews-state", type=Path, default=DEFAULT_REVIEWS_STATE,
                    help="review-summary state used for the sentiment column (default: %(default)s)")
+    x.add_argument("--tags-source", choices=TAG_SOURCES, default=TAGS_STEAM,
+                   help="steam: Store user tags (default); steamspy: SteamSpy tag votes (third party, optional)")
+    x.add_argument("--steamspy-cache", type=Path, default=DEFAULT_STEAMSPY_CACHE,
+                   help="SteamSpy response cache (default: %(default)s)")
+    x.add_argument("--steamspy-ttl-hours", type=float, default=spy.DEFAULT_TTL.total_seconds() / 3600,
+                   help="reuse cached SteamSpy responses younger than this (default: %(default)s)")
 
     r = sub.add_parser("reviews", help="collect game-level review summaries via IUserReviewsService/GetAppReviews")
     rsrc = r.add_mutually_exclusive_group()
@@ -166,12 +177,18 @@ def run_extract(args: argparse.Namespace, environ: Mapping[str, str], transport:
     except InvalidCredentialError as exc:
         print(f"error: {exc}")
         return EXIT_ERROR
+    if args.steamspy_ttl_hours < 0:
+        print("error: --steamspy-ttl-hours must be >= 0")
+        return EXIT_USAGE
     legacy_ids = discovery.load_legacy_appids(args.legacy_csv)
     transport = transport or SteamTransport()
     code = EXIT_OK
+    cache = spy.SteamSpyCache(args.steamspy_cache) if args.tags_source == TAGS_STEAMSPY else None
+    steamspy = (spy.SteamSpyClient(transport, cache, ttl=dt.timedelta(hours=args.steamspy_ttl_hours))
+                if cache is not None else None)
     with transport, extract.ExtractionState(args.state) as state:
         extractor = extract.Extractor(state, web=SteamWebAPI(transport, key), store=SteamStoreAPI(transport),
-                                      legacy_ids=legacy_ids)
+                                      legacy_ids=legacy_ids, tags_source=args.tags_source, steamspy=steamspy)
         report = None
         try:
             report = extractor.run(appids, limit=args.limit, refresh=args.refresh)
@@ -181,6 +198,9 @@ def run_extract(args: argparse.Namespace, environ: Mapping[str, str], transport:
             print("interrupted; progress is checkpointed")
             code = EXIT_INTERRUPTED
         counts = extract.export(state, args.out, rv.load_records(args.reviews_state))
+        if cache is not None:
+            print(f"SteamSpy: {steamspy.network_requests} network request(s); fresh cached responses were reused")
+            cache.close()
         print(f"exported to {args.out}: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
         if report is not None:
             print(f"{report.stop_reason}: {report.attempted} fetched, {report.extracted} complete, "
@@ -249,7 +269,7 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
     if args.command == "preflight":
         if args.appid <= 0:
             parser.error("--appid must be positive")
-        return preflight.run(environ, live=args.live, appid=args.appid)
+        return preflight.run(environ, live=args.live, appid=args.appid, steamspy=args.steamspy)
     if args.command == "discover":
         if args.page_size < 1:
             parser.error("--page-size must be positive")

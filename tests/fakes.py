@@ -95,7 +95,8 @@ def make_transport(fake: FakeSteam, clock: FakeClock | None = None, **kwargs) ->
     session.mount("https://", fake)
     session.mount("http://", fake)
     kwargs.setdefault("retry", RetryPolicy(max_attempts=3, backoff_base=1.0))
-    kwargs.setdefault("min_intervals", {"api.steampowered.com": 0.0, "store.steampowered.com": 0.0})
+    kwargs.setdefault("min_intervals", {"api.steampowered.com": 0.0, "store.steampowered.com": 0.0,
+                                        "steamspy.com": 0.0})
     return SteamTransport(
         session=session, sleep=clock.sleep, clock=clock.time, wall_clock=clock.time, rand=lambda: 0.0, **kwargs
     )

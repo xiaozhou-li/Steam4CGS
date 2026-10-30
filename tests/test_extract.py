@@ -190,3 +190,39 @@ def test_committed_samples_are_up_to_date(tmp_path):
                  "review_summaries.sample.csv", "review_summaries.meta.sample.json"):
         assert (out / name).read_bytes() == (SAMPLES_DIR / name).read_bytes(), (
             f"docs/samples/{name} is stale; regenerate with: python3.13 tests/sample_data.py")
+
+
+def test_early_access_and_tag_vote_datasets(state, tmp_path):
+    build_extractor(state, SampleSteam()).run(sorted(APPDETAILS))
+    extract.export(state, tmp_path / "out")
+    ea = {int(r["appid"]): r for r in read(tmp_path / "out" / "early_access.csv")}
+    assert tuple(next(iter(ea.values()))) == extract.EARLY_ACCESS_FIELDS
+    assert {a: (r["early_access"], r["status"], r["store_item_is_early_access"], r["genres_early_access"])
+            for a, r in ea.items()} == {
+        9900001: ("FALSE", "false", "false", "absent"),
+        9900002: ("TRUE", "true", "true", "present"),
+        9900003: ("", "unknown", "absent", "no_genres"),        # no flag, no genres
+        9900004: ("", "unknown", "unavailable", "absent"),      # store item failed; genre absence is not FALSE
+    }
+    assert all(r["store_item_retrieved_at"] for a, r in ea.items() if a != 9900004)
+    games = {int(r["id"]): r for r in read(tmp_path / "out" / "games.csv")}
+    assert all(games[a]["early_access"] == ea[a]["early_access"] for a in ea)
+    votes = read(tmp_path / "out" / "tag_votes.csv")
+    assert tuple(votes[0]) == extract.TAG_VOTE_FIELDS
+    assert all(v["count_kind"] == "steam_tag_weight" for v in votes)
+    # Only the 13 legacy columns are in games.csv; the extra fields live in their own files.
+    with open(tmp_path / "out" / "games.csv", newline="", encoding="utf-8") as f:
+        assert tuple(next(csv.reader(f))) == schema.COLUMNS
+
+
+def test_older_state_files_are_migrated(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(path)
+    db.executescript("""CREATE TABLE extracted (appid INTEGER PRIMARY KEY, row_json TEXT NOT NULL,
+        provenance_json TEXT NOT NULL, complete INTEGER NOT NULL, extracted_at TEXT NOT NULL);""")
+    db.close()
+    with ExtractionState(path) as st:
+        build_extractor(st, SampleSteam()).run([9900001])
+        assert st.extras()[9900001]["tags_source"] == "steam"

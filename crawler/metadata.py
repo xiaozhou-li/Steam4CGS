@@ -1,10 +1,12 @@
 """Normalize Steam Store sources into one legacy-format row plus per-field provenance.
 
 ``normalize`` is pure: it takes already-fetched source payloads and returns a
-validated :class:`crawler.schema.GameRecord` row and one provenance record per
-column. It never substitutes one source for another (no genres as tags), never
-derives a review label, and prices from the regular listing price only. The
-mapping rules are documented in docs/metadata.md.
+validated :class:`crawler.schema.GameRecord` row, one provenance record per
+column, and extra datasets kept outside the 13 legacy columns (tag vote counts,
+Early Access evidence). It never substitutes one source for another (no genres
+as tags), takes ``sentiment`` only from a verified GetAppReviews record, reports
+Early Access as unknown unless the Store says so explicitly, and prices from the
+regular listing price only. The mapping rules are documented in docs/metadata.md.
 """
 
 from __future__ import annotations
@@ -17,8 +19,10 @@ from typing import Any
 
 from crawler import reviews as rv
 from crawler import schema
+from crawler import steamspy as spy
 from crawler.release_dates import parse_release_date
-from crawler.steam_api import MAX_TAGS
+from crawler.steam_api import MAX_TAGS, store_item_tag_weights
+from crawler.transport import SteamResponseError
 
 # Provenance statuses
 PRESENT = "present"                        # value taken from the source
@@ -57,6 +61,14 @@ _SPEC_RANK = {label: i for i, label in enumerate(SPEC_ORDER)}
 
 PROVENANCE_FIELDS = ("appid", "field", "value", "status", "source", "source_url", "retrieved_at", "raw", "note")
 
+# Tag sources (extract --tags-source)
+TAGS_STEAM = "steam"        # IStoreBrowseService/GetItems tag ids + GetTagList names (default)
+TAGS_STEAMSPY = "steamspy"  # SteamSpy appdetails tag -> votes (optional, third party)
+TAG_SOURCES = (TAGS_STEAM, TAGS_STEAMSPY)
+
+# Early Access status
+EA_TRUE, EA_FALSE, EA_UNKNOWN = "true", "false", "unknown"
+
 
 class ExtractionError(Exception):
     """A row cannot be built (no store details, AppID mismatch, required field missing)."""
@@ -71,6 +83,7 @@ class SourceResult:
     retrieved_at: str | None
     data: Any = None
     error: str | None = None
+    cached: bool = False  # served from a local cache; retrieved_at is the original fetch time
 
     @property
     def ok(self) -> bool:
@@ -99,6 +112,7 @@ class Extracted:
     row: dict[str, str]
     provenance: tuple[FieldProvenance, ...]
     complete: bool  # False when any source was unavailable (worth retrying later)
+    extras: dict = field(default_factory=dict)  # fields kept outside the 13 legacy columns
 
 
 def _raw(value: Any) -> str:
@@ -140,7 +154,14 @@ def normalize(
     tags: SourceResult,
     tag_names: Mapping[int, str] | None,
     review: rv.ReviewRecord | None = None,
+    store_item: SourceResult | None = None,
 ) -> Extracted:
+    """Build one row.
+
+    ``tags`` is either a ``store_items`` source (data: list of tag ids, names from
+    ``tag_names``) or a ``steamspy`` source (data: SteamSpy appdetails object).
+    ``store_item`` is the GetItems store item used as Early Access evidence.
+    """
     if not appdetails.ok:
         raise ExtractionError(f"appdetails unavailable: {appdetails.error}")
     data = appdetails.data
@@ -173,13 +194,11 @@ def normalize(
     if genres:
         b.set("genres", schema.encode_list(genres), PRESENT, ad, "genres[].description", raw_genres,
               "sorted case-insensitively, 'Early Access' last (legacy order)")
-        early = schema.EARLY_ACCESS_GENRE in genres
-        b.set("early_access", schema.encode_bool(early), PRESENT, ad, "genres[].description", raw_genres,
-              f"'Early Access' genre {'present' if early else 'absent'}")
     else:
         b.set("genres", "", MISSING, ad, "genres", raw_genres)
-        b.set("early_access", "", UNVERIFIED, ad, "genres", raw_genres,
-              "no genres, so the Early Access genre cannot be checked; user tags are not used")
+    ea = early_access_evidence(appid, genres if genres else None, ad, store_item)
+    b.provenance.append(ea.provenance)
+    b.row["early_access"] = ea.provenance.value
 
     # developer / publisher ------------------------------------------------------------------
     for column, key in (("developer", "developers"), ("publisher", "publishers")):
@@ -221,7 +240,10 @@ def normalize(
         b.set("specs", "", MISSING, ad, "categories", raw_categories)
 
     # tags ----------------------------------------------------------------------------------------
-    _map_tags(b, tags, tag_names)
+    if tags.name == TAGS_STEAMSPY:
+        tag_votes = _map_steamspy_tags(b, tags)
+    else:
+        tag_votes = _map_tags(b, tags, tag_names, store_item)
 
     # price -----------------------------------------------------------------------------------------
     _map_price(b, ad, data)
@@ -249,29 +271,140 @@ def normalize(
     provenance = tuple(by_field[c] for c in schema.COLUMNS)
     # Review summaries are collected separately (python -m crawler reviews), so they don't make a row partial.
     complete = all(p.status != SOURCE_UNAVAILABLE for p in provenance if p.field != "sentiment")
-    return Extracted(record, row, provenance, complete)
+    extras = {
+        "tags_source": TAGS_STEAMSPY if tags.name == TAGS_STEAMSPY else TAGS_STEAM,
+        "tag_votes": tag_votes,
+        "early_access": ea.as_row(),
+    }
+    return Extracted(record, row, provenance, complete, extras)
 
 
-def _map_tags(b: _Builder, tags: SourceResult, tag_names: Mapping[int, str] | None) -> None:
+def _tag_vote_rows(src: SourceResult, ranked: Sequence[tuple[str, int | None]], kind: str) -> list[dict[str, str]]:
+    return [{"rank": str(i), "tag": name, "count": "" if count is None else str(count), "count_kind": kind,
+             "source": src.name, "source_url": src.url, "retrieved_at": src.retrieved_at or ""}
+            for i, (name, count) in enumerate(ranked, 1)]
+
+
+def _map_tags(b: _Builder, tags: SourceResult, tag_names: Mapping[int, str] | None,
+              store_item: SourceResult | None) -> list[dict[str, str]]:
     if not tags.ok:
         b.set("tags", "", SOURCE_UNAVAILABLE, tags, "", None, tags.error or "")
-        return
+        return []
     if tag_names is None:
         b.set("tags", "", SOURCE_UNAVAILABLE, tags, "tagids", tags.data, "tag names (GetTagList) unavailable")
-        return
+        return []
     if tags.data is None:
         b.set("tags", "", MISSING, tags, "store_items", None, "no visible store item")
-        return
+        return []
     tagids: Sequence[int] = tags.data
-    names = [tag_names[t] for t in tagids if t in tag_names][:MAX_TAGS]
+    weights: dict[int, int | None] = {}
+    if store_item is not None and store_item.ok and isinstance(store_item.data, Mapping):
+        try:
+            weights = dict(store_item_tag_weights(store_item.data))
+        except SteamResponseError:
+            weights = {}
+    ranked = [(tag_names[t], weights.get(t)) for t in tagids if t in tag_names][:MAX_TAGS]
     unknown = [t for t in tagids if t not in tag_names]
     note = "Steam order (most votes first); genres are never used as tags"
     if unknown:
         note += f"; unknown tag ids skipped: {unknown}"
-    if names:
-        b.set("tags", schema.encode_list(names), PRESENT, tags, "tags[].tagid", list(tagids), note)
+    if ranked:
+        b.set("tags", schema.encode_list([n for n, _ in ranked]), PRESENT, tags, "tags[].tagid", list(tagids), note)
+        return _tag_vote_rows(tags, ranked, "steam_tag_weight")
+    b.set("tags", "", MISSING, tags, "tags", list(tagids), "no user tags" if not tagids else note)
+    return []
+
+
+def _map_steamspy_tags(b: _Builder, src: SourceResult) -> list[dict[str, str]]:
+    cache_note = "; served from cache (retrieved_at is the original fetch)" if src.cached else ""
+    if not src.ok:
+        b.set("tags", "", SOURCE_UNAVAILABLE, src, "", None, (src.error or "") + "; genres are not substituted")
+        return []
+    raw_tags = src.data.get("tags") if isinstance(src.data, Mapping) else None
+    try:
+        ranked = spy.parse_tags(b.appid, src.data)
+    except spy.SteamSpyFormatError as exc:
+        b.set("tags", "", UNRECOGNIZED, src, "tags", raw_tags, f"{exc}; genres are not substituted{cache_note}")
+        return []
+    if ranked is None:
+        b.set("tags", "", MISSING, src, "name", None, f"SteamSpy has no record for this app{cache_note}")
+        return []
+    if not ranked:
+        b.set("tags", "", MISSING, src, "tags", raw_tags, f"SteamSpy lists no tags; genres are not substituted{cache_note}")
+        return []
+    top = ranked[:MAX_TAGS]
+    b.set("tags", schema.encode_list([n for n, _ in top]), PRESENT, src, "tags", raw_tags,
+          f"top {len(top)} of {len(ranked)} by votes desc, ties by name; vote counts in tag_votes.csv{cache_note}")
+    return _tag_vote_rows(src, top, "steamspy_votes")
+
+
+@dataclass(frozen=True)
+class EarlyAccess:
+    status: str           # true | false | unknown
+    reason: str
+    store_item_flag: str  # true | false | absent | no_store_item | unavailable | not_requested
+    genre: str            # present | absent | no_genres
+    provenance: FieldProvenance
+    store_item_url: str
+    store_item_retrieved_at: str
+    appdetails_url: str
+    appdetails_retrieved_at: str
+
+    def as_row(self) -> dict[str, str]:
+        return {"early_access": self.provenance.value, "status": self.status, "reason": self.reason,
+                "store_item_is_early_access": self.store_item_flag, "genres_early_access": self.genre,
+                "store_item_url": self.store_item_url, "store_item_retrieved_at": self.store_item_retrieved_at,
+                "appdetails_url": self.appdetails_url, "appdetails_retrieved_at": self.appdetails_retrieved_at}
+
+
+def early_access_evidence(appid: int, genres: Sequence[str] | None, appdetails: SourceResult,
+                          store_item: SourceResult | None) -> EarlyAccess:
+    """TRUE / FALSE / unknown from current Store metadata; absence of evidence is never FALSE.
+
+    Evidence: the GetItems store item's explicit ``is_early_access`` flag and
+    the ``Early Access`` genre in appdetails. User tags are never consulted.
+    """
+    genre = "no_genres" if not genres else ("present" if schema.EARLY_ACCESS_GENRE in genres else "absent")
+    if store_item is None:
+        flag = "not_requested"
+    elif not store_item.ok:
+        flag = "unavailable"
+    elif not isinstance(store_item.data, Mapping):
+        flag = "no_store_item"
     else:
-        b.set("tags", "", MISSING, tags, "tags", list(tagids), "no user tags" if not tagids else note)
+        value = store_item.data.get("is_early_access")
+        flag = ("true" if value else "false") if isinstance(value, bool) else "absent"
+
+    if flag == "true":
+        status, reason = ((EA_UNKNOWN, "conflict: store item is_early_access=true but genres lack 'Early Access'")
+                          if genre == "absent" else (EA_TRUE, "store item is_early_access=true"))
+    elif flag == "false":
+        status, reason = ((EA_UNKNOWN, "conflict: store item is_early_access=false but genres include 'Early Access'")
+                          if genre == "present" else (EA_FALSE, "store item is_early_access=false"))
+    elif genre == "present":
+        status, reason = EA_TRUE, f"'Early Access' genre present; store item flag {flag}"
+    elif genre == "absent":
+        status, reason = EA_UNKNOWN, (f"no explicit store flag (store item: {flag}); absence of the "
+                                      "'Early Access' genre is not treated as FALSE")
+    else:
+        status, reason = EA_UNKNOWN, f"no explicit store flag (store item: {flag}) and no genres"
+
+    cell = {EA_TRUE: "TRUE", EA_FALSE: "FALSE", EA_UNKNOWN: ""}[status]
+    if status != EA_UNKNOWN:
+        prov_status = PRESENT
+    elif flag == "unavailable":
+        prov_status = SOURCE_UNAVAILABLE  # retry later: the deciding source failed
+    else:
+        prov_status = UNVERIFIED
+    item_url = store_item.url if store_item is not None else ""
+    item_at = (store_item.retrieved_at or "") if store_item is not None else ""
+    raw = {"store_item.is_early_access": flag, "genres": genre}
+    prov = FieldProvenance(appid, "early_access", cell, prov_status,
+                           "store_items:is_early_access+appdetails:genres", item_url or appdetails.url,
+                           item_at or (appdetails.retrieved_at or ""), _raw(raw),
+                           reason + "; user tags are never used")
+    return EarlyAccess(status, reason, flag, genre, prov, item_url, item_at, appdetails.url,
+                       appdetails.retrieved_at or "")
 
 
 def _map_price(b: _Builder, ad: SourceResult, data: Mapping[str, Any]) -> None:

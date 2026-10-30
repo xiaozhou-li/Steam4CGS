@@ -102,12 +102,29 @@ STORE_ITEM_TAGS = {
 }
 
 
+# GetItems is_early_access per app (missing key -> the field is absent from the item).
+STORE_ITEM_EARLY_ACCESS = {9900001: False, 9900002: True}
+
+# SteamSpy appdetails bodies (the optional tags source).
+_SPY_TAGS_1 = {"Indie": 120, "Action": 120, "Point & Click": 80, "adventure": 40, "Adventure": 40,
+               **{f"Sample Tag {i:02d}": 30 - i for i in range(18)}}  # 23 tags, with ties
+STEAMSPY = {
+    9900001: {"appid": 9900001, "name": "Sample: Kestrel & Crow", "positive": 1100, "negative": 134,
+              "owners": "20,000 .. 50,000", "tags": _SPY_TAGS_1},
+    9900002: {"appid": 9900002, "name": "Sample Sandbox", "tags": []},     # record without tags
+    9900003: {"appid": 9900003, "name": None, "tags": []},                 # SteamSpy has no record
+    9900004: 500,                                                          # SteamSpy unavailable
+}
+
+
 class SampleSteam(BaseAdapter):
     """Serves the synthetic payloads above for the four endpoints the extractor uses."""
 
     def __init__(self, appdetails=None, reviews=None, tags=None, tag_names=None,
-                 review_params=REVIEW_METHOD_PARAMS):
+                 review_params=REVIEW_METHOD_PARAMS, early_access=None, steamspy=None):
         super().__init__()
+        self.early_access = dict(STORE_ITEM_EARLY_ACCESS if early_access is None else early_access)
+        self.steamspy = dict(STEAMSPY if steamspy is None else steamspy)
         self.review_params = review_params  # None: GetAppReviews not listed
         self.appdetails = dict(APPDETAILS if appdetails is None else appdetails)
         self.reviews = dict(REVIEWS if reviews is None else reviews)
@@ -153,7 +170,15 @@ class SampleSteam(BaseAdapter):
                 return self._respond(request, tags, {})
             item = {"item_type": 0, "id": appid, "success": 1, "visible": True, "appid": appid,
                     "tagids": [t["tagid"] for t in tags], "tags": tags}
+            if appid in self.early_access:
+                item["is_early_access"] = self.early_access[appid]
             return self._respond(request, 200, {"response": {"store_items": [item]}})
+        if url.hostname == "steamspy.com" and url.path == "/api.php":
+            assert params["request"] == "appdetails" and "key" not in params
+            body = self.steamspy.get(int(params["appid"]), {"appid": int(params["appid"]), "name": None, "tags": []})
+            if isinstance(body, int):
+                return self._respond(request, body, {})
+            return self._respond(request, 200, body)
         if url.path == "/IStoreService/GetTagList/v1/":
             if isinstance(self.tag_names, int):
                 return self._respond(request, self.tag_names, {})
@@ -165,16 +190,20 @@ class SampleSteam(BaseAdapter):
         pass
 
 
-def build_extractor(state, adapter: SampleSteam, legacy_ids=frozenset(), key=None):
+def build_extractor(state, adapter: SampleSteam, legacy_ids=frozenset(), key=None, *, tags_source="steam",
+                    steamspy_cache=None, now=lambda: FIXED_NOW):
     from fakes import make_transport
 
     from crawler.extract import Extractor
     from crawler.steam_api import SteamStoreAPI, SteamWebAPI
+    from crawler.steamspy import SteamSpyClient
     from crawler.transport import RetryPolicy
 
     transport = make_transport(adapter, retry=RetryPolicy(max_attempts=1))
+    steamspy = SteamSpyClient(transport, steamspy_cache, now=now) if tags_source == "steamspy" else None
     return Extractor(state, web=SteamWebAPI(transport, key), store=SteamStoreAPI(transport),
-                     legacy_ids=frozenset(legacy_ids), now=lambda: FIXED_NOW, log=lambda _: None)
+                     legacy_ids=frozenset(legacy_ids), tags_source=tags_source, steamspy=steamspy,
+                     now=now, log=lambda _: None)
 
 
 def build_collector(state, adapter: SampleSteam, legacy_ids=frozenset(), key=None, settings=None):
@@ -201,7 +230,7 @@ def write_samples(out_dir: Path, state_dir: Path) -> dict[str, int]:
     with ExtractionState(state_dir / "extract.sqlite3") as state:
         build_extractor(state, adapter).run(sorted(APPDETAILS))
         counts = export(state, out_dir, records)
-    for name in ("games", "provenance", "prices", "failed", "review_summaries"):
+    for name in ("games", "provenance", "prices", "tag_votes", "early_access", "failed", "review_summaries"):
         (out_dir / f"{name}.csv").rename(out_dir / f"{name}.sample.csv")
     (out_dir / "review_summaries.meta.json").rename(out_dir / "review_summaries.meta.sample.json")
     return counts

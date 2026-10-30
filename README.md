@@ -21,4 +21,5 @@ python -m crawler preflight --live   # at most 8 real requests for one app id
 python -m crawler discover --limit 50  # discover new games (see docs/discovery.md)
 python -m crawler reviews --limit 100  # review summaries via GetAppReviews (see docs/reviews.md)
 python -m crawler extract --limit 25   # Store metadata for eligible games (see docs/metadata.md)
+python -m crawler extract --tags-source steamspy   # optional: community tags from SteamSpy
 ```

@@ -232,12 +232,8 @@ class SteamWebAPI:
 
     # -- tags ----------------------------------------------------------------------
 
-    def get_store_item_tags(self, appid: int, *, country: str = "us", language: str = "english") -> list[int] | None:
-        """User-tag ids for one app from ``IStoreBrowseService/GetItems/v1``, most-voted first.
-
-        Returns ``None`` when Steam has no visible store item for the app, and
-        ``[]`` when the item exists but has no tags.
-        """
+    def get_store_item(self, appid: int, *, country: str = "us", language: str = "english") -> dict | None:
+        """The ``IStoreBrowseService/GetItems/v1`` store item for one app, or ``None`` if none is visible."""
         _, params = store_items_request(_check_appid(appid), country, language)
         response = self._response(
             self.call("IStoreBrowseService", "GetItems", 1, params, require_key=False), "GetItems")
@@ -247,17 +243,14 @@ class SteamWebAPI:
         item = next((i for i in items if isinstance(i, dict) and i.get("appid", i.get("id")) == appid), None)
         if item is None or item.get("success", 1) != 1:
             return None
-        weighted = item.get("tags")
-        if isinstance(weighted, list) and weighted:
-            pairs = [(t.get("tagid"), t.get("weight", 0)) for t in weighted if isinstance(t, dict)]
-            if not all(isinstance(tid, int) and isinstance(w, int) for tid, w in pairs):
-                raise SteamResponseError("GetItems 'tags': expected {tagid:int, weight:int} objects")
-            # Stable sort keeps Steam's order for equal weights.
-            return [tid for tid, _ in sorted(pairs, key=lambda p: -p[1])]
-        tagids = item.get("tagids", [])
-        if not isinstance(tagids, list) or not all(isinstance(t, int) for t in tagids):
-            raise SteamResponseError("GetItems 'tagids': expected a list of int")
-        return list(tagids)
+        return item
+
+    def get_store_item_tags(self, appid: int, *, country: str = "us", language: str = "english") -> list[int] | None:
+        """User-tag ids for one app, most-voted first (``None``: no visible store item)."""
+        item = self.get_store_item(appid, country=country, language=language)
+        if item is None:
+            return None
+        return [tagid for tagid, _ in store_item_tag_weights(item)]
 
     def get_tag_names(self, *, language: str = "english") -> dict[int, str]:
         """``IStoreService/GetTagList/v1``: tag id -> localized tag name."""
@@ -268,6 +261,24 @@ class SteamWebAPI:
             raise SteamResponseError("GetTagList 'tags': expected a list")
         return {t["tagid"]: t["name"] for t in tags
                 if isinstance(t, dict) and isinstance(t.get("tagid"), int) and isinstance(t.get("name"), str)}
+
+
+def store_item_tag_weights(item: Mapping[str, Any]) -> list[tuple[int, int | None]]:
+    """(tagid, weight) pairs from a GetItems store item, heaviest first.
+
+    Uses ``tags[].{tagid, weight}`` when present (stable sort keeps Steam's order
+    for equal weights), else ``tagids`` with unknown weights.
+    """
+    weighted = item.get("tags")
+    if isinstance(weighted, list) and weighted:
+        pairs = [(t.get("tagid"), t.get("weight", 0)) for t in weighted if isinstance(t, dict)]
+        if not all(isinstance(tid, int) and isinstance(w, int) for tid, w in pairs):
+            raise SteamResponseError("GetItems 'tags': expected {tagid:int, weight:int} objects")
+        return sorted(pairs, key=lambda p: -p[1])
+    tagids = item.get("tagids", [])
+    if not isinstance(tagids, list) or not all(isinstance(t, int) for t in tagids):
+        raise SteamResponseError("GetItems 'tagids': expected a list of int")
+    return [(t, None) for t in tagids]
 
 
 # --------------------------------------------------------------------------

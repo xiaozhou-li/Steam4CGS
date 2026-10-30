@@ -1,8 +1,9 @@
 """Fetch and normalize Store metadata for eligible AppIDs.
 
 For each AppID: Store ``appdetails`` (core fields) and
-``IStoreBrowseService/GetItems`` (user tag ids; names from one
-``IStoreService/GetTagList`` call per invocation). ``sentiment`` is filled at
+``IStoreBrowseService/GetItems`` (Early Access flag, and user tag ids with
+names from one ``IStoreService/GetTagList`` call per invocation), or, with
+``tags_source="steamspy"``, tags from SteamSpy (cached). ``sentiment`` is filled at
 export time from verified GetAppReviews records (crawler.reviews), never
 fetched here. Results are checkpointed per app in SQLite; exports are
 regenerated from that state:
@@ -10,6 +11,8 @@ regenerated from that state:
 * ``games.csv``       legacy 13-column format, validated by crawler.schema
 * ``provenance.csv``  one row per (appid, field): raw value, source URL, time, status
 * ``prices.csv``      the price provenance flattened: currency, regular/sale cents, discount
+* ``tag_votes.csv``   the top-20 tags with vote counts (SteamSpy) or weights (Steam)
+* ``early_access.csv`` TRUE / FALSE / unknown with the evidence behind it
 * ``failed.csv``      AppIDs whose row could not be built, with the reason
 """
 
@@ -30,6 +33,8 @@ from crawler.discovery_state import iso
 from crawler.metadata import (
     PRICE_CONVERSION,
     PROVENANCE_FIELDS,
+    TAGS_STEAM,
+    TAGS_STEAMSPY,
     ExtractionError,
     FieldProvenance,
     SourceResult,
@@ -37,17 +42,24 @@ from crawler.metadata import (
     with_review,
 )
 from crawler.reviews import ReviewRecord
+from crawler.steamspy import SteamSpyClient
+from crawler.steamspy import appdetails_request as spy_appdetails_request
 from crawler.steam_api import (
     SteamStoreAPI,
     SteamWebAPI,
     appdetails_request,
     public_url,
+    store_item_tag_weights,
     store_items_request,
     tag_list_request,
 )
 from crawler.transport import RequestBudgetExceeded, SteamError, SteamRateLimitError
 
 FAILED_FIELDS = ("appid", "error", "detail", "attempts", "last_attempt_at")
+TAG_VOTE_FIELDS = ("appid", "rank", "tag", "count", "count_kind", "source", "source_url", "retrieved_at")
+EARLY_ACCESS_FIELDS = ("appid", "early_access", "status", "reason", "store_item_is_early_access",
+                       "genres_early_access", "store_item_url", "store_item_retrieved_at", "appdetails_url",
+                       "appdetails_retrieved_at")
 PRICE_FIELDS = ("appid", "price", "status", "currency", "initial_cents", "final_cents", "discount_percent",
                 "is_free", "source", "source_url", "retrieved_at", "conversion")
 
@@ -85,6 +97,9 @@ class ExtractionState:
         self._db.execute("PRAGMA journal_mode=WAL")
         with self._db:
             self._db.executescript(_SCHEMA)
+            columns = {r[1] for r in self._db.execute("PRAGMA table_info(extracted)")}
+            if "extras_json" not in columns:  # state files created before extras existed
+                self._db.execute("ALTER TABLE extracted ADD COLUMN extras_json TEXT NOT NULL DEFAULT '{}'")
 
     def close(self) -> None:
         self._db.close()
@@ -103,16 +118,18 @@ class ExtractionState:
         failed = {r[0] for r in self._db.execute("SELECT appid FROM failures")}
         return complete, partial, failed
 
-    def save(self, row: dict[str, str], provenance: Sequence[FieldProvenance], complete: bool, now: dt.datetime) -> None:
+    def save(self, row: dict[str, str], provenance: Sequence[FieldProvenance], complete: bool, now: dt.datetime,
+             extras: Mapping | None = None) -> None:
         appid = int(row["id"])
         with self._db:
             self._db.execute(
-                """INSERT INTO extracted VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO extracted (appid, row_json, provenance_json, complete, extracted_at, extras_json)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(appid) DO UPDATE SET row_json = excluded.row_json,
                        provenance_json = excluded.provenance_json, complete = excluded.complete,
-                       extracted_at = excluded.extracted_at""",
+                       extracted_at = excluded.extracted_at, extras_json = excluded.extras_json""",
                 (appid, json.dumps(row, ensure_ascii=False), json.dumps([p.as_row() for p in provenance], ensure_ascii=False),
-                 int(complete), iso(now)),
+                 int(complete), iso(now), json.dumps(extras or {}, ensure_ascii=False)),
             )
             self._db.execute("DELETE FROM failures WHERE appid = ?", (appid,))
 
@@ -128,6 +145,9 @@ class ExtractionState:
     def rows(self) -> list[tuple[dict[str, str], list[dict[str, str]]]]:
         return [(json.loads(r), json.loads(p))
                 for r, p in self._db.execute("SELECT row_json, provenance_json FROM extracted ORDER BY appid")]
+
+    def extras(self) -> dict[int, dict]:
+        return {a: json.loads(e) for a, e in self._db.execute("SELECT appid, extras_json FROM extracted ORDER BY appid")}
 
     def failures(self) -> list[dict[str, str]]:
         cur = self._db.execute(f"SELECT {', '.join(FAILED_FIELDS)} FROM failures ORDER BY appid")
@@ -154,9 +174,17 @@ class Extractor:
         web: SteamWebAPI,
         store: SteamStoreAPI,
         legacy_ids: frozenset[int],
+        tags_source: str = TAGS_STEAM,
+        steamspy: SteamSpyClient | None = None,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc),
         log: Callable[[str], None] = print,
     ):
+        if tags_source not in (TAGS_STEAM, TAGS_STEAMSPY):
+            raise ValueError(f"unknown tags_source {tags_source!r}")
+        if tags_source == TAGS_STEAMSPY and steamspy is None:
+            raise ValueError("tags_source='steamspy' needs a SteamSpyClient")
+        self.tags_source = tags_source
+        self.steamspy = steamspy
         self.state = state
         self.web = web
         self.store = store
@@ -198,15 +226,41 @@ class Extractor:
         if details.data is None:
             self.state.fail(appid, "store_details_unavailable", "appdetails returned success=false", self._now())
             return None
-        tags = self._source("store_items", store_items_request(appid, cc, lang),
-                            lambda: self.web.get_store_item_tags(appid, country=cc, language=lang))
+        item = self._source("store_items", store_items_request(appid, cc, lang),
+                            lambda: self.web.get_store_item(appid, country=cc, language=lang))
+        if self.tags_source == TAGS_STEAMSPY:
+            tags, tag_names = self._steamspy_source(appid), None
+        else:
+            tags, tag_names = self._steam_tags(item), self._load_tag_names()
         try:
-            extracted = normalize(appid, details, tags, self._load_tag_names())
+            extracted = normalize(appid, details, tags, tag_names, store_item=item)
         except ExtractionError as exc:
             self.state.fail(appid, "normalization_error", str(exc), self._now())
             return None
-        self.state.save(extracted.row, extracted.provenance, extracted.complete, self._now())
+        self.state.save(extracted.row, extracted.provenance, extracted.complete, self._now(), extracted.extras)
         return None
+
+    @staticmethod
+    def _steam_tags(item: SourceResult) -> SourceResult:
+        """Tag ids from the already-fetched GetItems store item (no extra request)."""
+        if not item.ok or item.data is None:
+            return item
+        try:
+            tagids = [t for t, _ in store_item_tag_weights(item.data)]
+        except SteamError as exc:
+            return SourceResult(item.name, item.url, item.retrieved_at, error=f"{type(exc).__name__}: {exc}")
+        return SourceResult(item.name, item.url, item.retrieved_at, data=tagids)
+
+    def _steamspy_source(self, appid: int) -> SourceResult:
+        url = public_url(*spy_appdetails_request(appid))
+        try:
+            response = self.steamspy.appdetails(appid)
+        except (SteamRateLimitError, RequestBudgetExceeded):
+            raise
+        except SteamError as exc:
+            return SourceResult(TAGS_STEAMSPY, url, iso(self._now()), error=f"{type(exc).__name__}: {exc}")
+        return SourceResult(TAGS_STEAMSPY, response.url, response.retrieved_at, data=response.data,
+                            cached=response.from_cache)
 
     def run(self, appids: Iterable[int], *, limit: int | None = None, refresh: bool = False) -> ExtractReport:
         report = ExtractReport()
@@ -217,12 +271,15 @@ class Extractor:
             self._log(f"skipping {len(report.skipped_legacy)} AppID(s) already in the legacy CSV")
         complete, partial, failed = self.state.status()
         candidates = [a for a in wanted if a not in self.legacy_ids]
+        # A row extracted with another tag source is stale for this run.
+        stored_sources = {a: e.get("tags_source", TAGS_STEAM) for a, e in self.state.extras().items()}
+        stale = {a for a in complete if stored_sources.get(a, TAGS_STEAM) != self.tags_source}
         if refresh:
             todo = candidates
         else:
-            # Never-attempted apps first, then retries of partial/failed ones.
+            # Never-attempted apps first, then retries of partial/failed/stale ones.
             fresh = [a for a in candidates if a not in complete | partial | failed]
-            todo = fresh + [a for a in candidates if a in partial | failed]
+            todo = fresh + [a for a in candidates if a in partial | failed | stale]
         self._log(f"{len(todo)} AppID(s) to extract")
 
         for appid in todo:
@@ -283,6 +340,11 @@ def export(state: ExtractionState, out_dir: str | Path,
     write_csv_atomic(out / "provenance.csv", PROVENANCE_FIELDS, (p for _, prov in stored for p in prov))
     write_csv_atomic(out / "prices.csv", PRICE_FIELDS,
                      (price_row(p) for _, prov in stored for p in prov if p["field"] == "price"))
+    extras = state.extras()
+    write_csv_atomic(out / "tag_votes.csv", TAG_VOTE_FIELDS,
+                     ({"appid": a, **v} for a, e in extras.items() for v in e.get("tag_votes", [])))
+    write_csv_atomic(out / "early_access.csv", EARLY_ACCESS_FIELDS,
+                     ({"appid": a, **e["early_access"]} for a, e in extras.items() if "early_access" in e))
     failures = state.failures()
     write_csv_atomic(out / "failed.csv", FAILED_FIELDS, failures)
     return {"games": len(stored), "provenance_rows": sum(len(p) for _, p in stored), "failed": len(failures)}

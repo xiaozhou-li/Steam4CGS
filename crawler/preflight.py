@@ -17,6 +17,8 @@ from pathlib import Path
 import requests
 
 from crawler import reviews as rv
+from crawler import steamspy as spy
+from crawler.steam_api import store_item_tag_weights
 from crawler.credentials import ENV_VAR, ApiKey, InvalidCredentialError, load_api_key
 from crawler.steam_api import SteamStoreAPI, SteamWebAPI
 from crawler.transport import RetryPolicy, SteamError, SteamTransport
@@ -47,7 +49,8 @@ TransportFactory = Callable[[], SteamTransport]
 
 
 def _default_transport() -> SteamTransport:
-    return SteamTransport(retry=LIVE_RETRY, max_requests=LIVE_MAX_REQUESTS)
+    # +1 for the optional SteamSpy check.
+    return SteamTransport(retry=LIVE_RETRY, max_requests=LIVE_MAX_REQUESTS + 1)
 
 
 def offline_checks(environ: Mapping[str, str], legacy_script: Path = LEGACY_SCRIPT) -> tuple[list[CheckResult], ApiKey | None]:
@@ -81,7 +84,7 @@ def offline_checks(environ: Mapping[str, str], legacy_script: Path = LEGACY_SCRI
     return results, key
 
 
-def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> list[CheckResult]:
+def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport, *, steamspy: bool = False) -> list[CheckResult]:
     web = SteamWebAPI(transport, key)
     store = SteamStoreAPI(transport)
     results: list[CheckResult] = []
@@ -131,11 +134,25 @@ def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> li
                            f"currency={po.get('currency')!r}, {len(data)} fields")
 
     def tags() -> CheckResult:
-        ids = web.get_store_item_tags(appid)
+        item = web.get_store_item(appid)
+        ids = [t for t, _ in store_item_tag_weights(item)] if item is not None else []
         names = web.get_tag_names()
-        first = [names.get(t, f"?{t}") for t in (ids or [])[:5]]
+        first = [names.get(t, f"?{t}") for t in ids[:5]]
+        flag = "no store item" if item is None else (
+            f"is_early_access={item['is_early_access']!r}" if "is_early_access" in item else "is_early_access absent")
         return CheckResult("IStoreBrowseService/GetItems + IStoreService/GetTagList", OK if ids and names else WARN,
-                           f"appid {appid}: {len(ids or [])} tag id(s), {len(names)} tag name(s); first {first}")
+                           f"appid {appid}: {len(ids)} tag id(s), {len(names)} tag name(s); first {first}; {flag}")
+
+    def steamspy_tags() -> CheckResult:
+        response = spy.SteamSpyClient(transport).appdetails(appid)
+        try:
+            ranked = spy.parse_tags(appid, response.data)
+        except spy.SteamSpyFormatError as exc:
+            return CheckResult("SteamSpy appdetails", WARN, f"appid {appid}: unexpected shape: {exc}")
+        if ranked is None:
+            return CheckResult("SteamSpy appdetails", WARN, f"appid {appid}: no SteamSpy record")
+        return CheckResult("SteamSpy appdetails", OK if ranked else WARN,
+                           f"appid {appid}: {len(ranked)} tag(s); top {ranked[:3]}")
 
     attempt("GetSupportedAPIList", supported)
 
@@ -152,6 +169,8 @@ def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> li
 
     attempt("store appdetails", details)
     attempt("IStoreBrowseService/GetItems + IStoreService/GetTagList", tags)
+    if steamspy:
+        attempt("SteamSpy appdetails", steamspy_tags)
     return results
 
 
@@ -160,6 +179,7 @@ def run(
     *,
     live: bool = False,
     appid: int = DEFAULT_LIVE_APPID,
+    steamspy: bool = False,
     transport_factory: TransportFactory = _default_transport,
     legacy_script: Path = LEGACY_SCRIPT,
     out: Callable[[str], None] = print,
@@ -172,7 +192,7 @@ def run(
         with transport_factory() as transport:
             for s in secrets:
                 transport.register_secret(s)
-            results += live_checks(key, appid, transport)
+            results += live_checks(key, appid, transport, steamspy=steamspy)
             requests_sent = transport.requests_sent
     else:
         results.append(CheckResult("live checks", SKIP, f"pass --live to make at most {LIVE_MAX_REQUESTS} requests"))

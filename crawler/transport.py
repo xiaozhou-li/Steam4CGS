@@ -1,9 +1,11 @@
 """HTTP transport for Steam endpoints: timeouts, retries, rate limiting, redaction.
 
 All crawler network I/O goes through :class:`SteamTransport`. It only speaks
-HTTPS to an allowlist of Steam hosts and never follows redirects, so a
-query-string API key cannot be forwarded to another host. API keys are
-scrubbed from every error message it raises and from urllib3's debug log.
+HTTPS to an allowlist of hosts (Steam, plus the optional third-party SteamSpy)
+and never follows redirects, so a query-string API key cannot be forwarded to
+another host (the key is only ever added by SteamWebAPI, for
+api.steampowered.com). API keys are scrubbed from every error message it
+raises and from urllib3's debug log.
 """
 
 from __future__ import annotations
@@ -24,15 +26,17 @@ import requests
 log = logging.getLogger(__name__)
 
 USER_AGENT = f"steam4cgs-crawler/0.1 python-requests/{requests.__version__}"
-ALLOWED_HOSTS = frozenset({"api.steampowered.com", "store.steampowered.com"})
+ALLOWED_HOSTS = frozenset({"api.steampowered.com", "store.steampowered.com", "steamspy.com"})
 DEFAULT_TIMEOUT = (5.0, 30.0)  # (connect, read) seconds
 
 # Minimum seconds between requests to each host. 1.0 s keeps a key below the
 # Web API's 100,000 calls/day; Store appdetails has no published limit and is
-# commonly throttled near 200 requests per 5 minutes.
+# commonly throttled near 200 requests per 5 minutes. SteamSpy documents
+# 1 request per second for appdetails; 1.1 s leaves a margin.
 DEFAULT_MIN_INTERVALS: Mapping[str, float] = {
     "api.steampowered.com": 1.0,
     "store.steampowered.com": 1.5,
+    "steamspy.com": 1.1,
 }
 
 _KEY_PARAM_RE = re.compile(r"(?i)\b(key=)[^&\s'\"]+")

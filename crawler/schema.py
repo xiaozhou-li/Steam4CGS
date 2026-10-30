@@ -52,7 +52,8 @@ UTF8_BOM = b"\xef\xbb\xbf"
 # Required columns never have an empty cell; the rest use "" for missing.
 # developer, specs, price and early_access are never empty in the legacy file,
 # but new rows leave them blank rather than invent a value when the store
-# omits them (see docs/metadata.md); missingness is recorded in provenance.
+# omits them or (early_access) does not state it (see docs/metadata.md);
+# missingness is recorded in provenance.
 REQUIRED_COLUMNS: frozenset[str] = frozenset({"id", "title", "release_date", "app_name"})
 NULLABLE_COLUMNS: frozenset[str] = frozenset(COLUMNS) - REQUIRED_COLUMNS
 
@@ -471,16 +472,15 @@ def validate_row(row: Mapping[str, str], row_number: int | None = None) -> list[
         if decoded["title"] != title_from_app_name(decoded["app_name"]):
             out.append(Violation("title must equal html.escape(app_name, quote=False)", row_number, "title"))
     if "early_access" in decoded and "genres" in decoded:
-        in_genres = EARLY_ACCESS_GENRE in (decoded["genres"] or ())
-        if decoded["early_access"] is None:
-            # Blank means unverified, which is only possible when the genres evidence is missing.
-            if decoded["genres"] is not None:
-                out.append(Violation("early_access may be blank only when genres is blank", row_number, "early_access"))
-        elif decoded["early_access"] != in_genres:
-            out.append(
-                Violation(f"early_access must be TRUE exactly when genres contains {EARLY_ACCESS_GENRE!r}",
-                          row_number, "early_access")
-            )
+        # Blank means unknown and is always allowed. A TRUE/FALSE value must agree
+        # with the genres whenever genres are present (it holds for every legacy row).
+        genres = decoded["genres"]
+        if decoded["early_access"] is not None and genres is not None:
+            if decoded["early_access"] != (EARLY_ACCESS_GENRE in genres):
+                out.append(
+                    Violation(f"early_access must be TRUE exactly when genres contains {EARLY_ACCESS_GENRE!r}",
+                              row_number, "early_access")
+                )
     return out
 
 

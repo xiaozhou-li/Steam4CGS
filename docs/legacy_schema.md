@@ -70,9 +70,10 @@ example a publisher literally named `None`), they are real data.
 rows. For new data, `crawler/schema.py` (`REQUIRED_COLUMNS`) requires only
 `id`, `title`, `release_date` and `app_name`. `developer`, `specs`, `price`
 and `early_access` may be blank when the store does not provide them, rather
-than holding an invented value. `early_access` may be blank only when
-`genres` is blank, because genres are the evidence for it. The missingness
-is recorded in the provenance dataset (see `docs/metadata.md`).
+than holding an invented value. A blank `early_access` means unknown. A
+`TRUE`/`FALSE` value must still agree with `genres` whenever `genres` is
+present. The missingness is recorded in the provenance dataset (see
+`docs/metadata.md`).
 
 ## 3. Representations
 

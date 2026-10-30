@@ -75,8 +75,14 @@ def test_new_data_nullable_columns_round_trip_as_none():
     assert record.to_row() == row
 
 
-def test_blank_early_access_requires_blank_genres():
-    assert [c for c, _ in errors(make_row(early_access=""))] == ["early_access"]
+def test_blank_early_access_means_unknown_and_is_allowed_with_genres():
+    assert errors(make_row(early_access="")) == []
+
+
+def test_known_early_access_must_agree_with_present_genres():
+    assert errors(make_row(genres="['Action']", early_access="TRUE"))
+    assert errors(make_row(genres="['Action', 'Early Access']", early_access="FALSE"))
+    assert errors(make_row(genres="", early_access="TRUE")) == []  # no genres: nothing to contradict
 
 
 def test_cells_must_not_contain_line_breaks():

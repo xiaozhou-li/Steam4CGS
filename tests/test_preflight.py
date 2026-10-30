@@ -19,7 +19,7 @@ APP_LIST = {"response": {"apps": [{"appid": 10, "name": "CS"}, {"appid": 20, "na
 REVIEWS = {"response": {"query_summary": {"review_score_desc": "Overwhelmingly Positive", "total_positive": 390000,
                                            "total_negative": 10000, "total_reviews": 400000}}}
 DETAILS = {"620": {"success": True, "data": {"type": "game", "name": "Portal 2", "steam_appid": 620}}}
-ITEMS = {"response": {"store_items": [{"appid": 620, "success": 1, "tagids": [128, 1664]}]}}
+ITEMS = {"response": {"store_items": [{"appid": 620, "success": 1, "tagids": [128, 1664], "is_early_access": False}]}}
 TAG_LIST = {"response": {"tags": [{"tagid": 128, "name": "Puzzle"}, {"tagid": 1664, "name": "Co-op"}]}}
 TAIL = (reply(body=ITEMS), reply(body=TAG_LIST))
 TAIL_PATHS = ["/IStoreBrowseService/GetItems/v1/", "/IStoreService/GetTagList/v1/"]
@@ -92,7 +92,7 @@ def test_live_with_key_runs_all_checks_within_budget(no_legacy):
     assert ("IUserReviewsService/GetAppReviews/v1: appid 620: status=ok, "
             "review_score_desc='Overwhelmingly Positive', total_reviews=400000, params sent=[]") in out
     assert fake.calls[2].params == {"appid": "620", "key": FAKE_KEY}  # only declared params are sent
-    assert "2 tag id(s), 2 tag name(s); first ['Puzzle', 'Co-op']" in out
+    assert "2 tag id(s), 2 tag name(s); first ['Puzzle', 'Co-op']; is_early_access=False" in out
     assert "live requests sent: 6" in out
     assert tr.requests_sent <= preflight.LIVE_MAX_REQUESTS
     assert FAKE_KEY not in out
@@ -140,3 +140,14 @@ def test_cli_preflight_offline_never_echoes_any_key(capsys):
 def test_cli_rejects_bad_appid(capsys):
     with pytest.raises(SystemExit):
         cli.main(["preflight", "--appid", "0"], environ={})
+
+
+def test_live_steamspy_check_is_opt_in(no_legacy):
+    lines: list[str] = []
+    spy_body = {"appid": 620, "name": "Portal 2", "tags": {"Puzzle": 9000, "Co-op": 7000}}
+    fake = FakeSteam(reply(body=PUBLIC_ONLY), reply(body=DETAILS), *TAIL, reply(body=spy_body))
+    preflight.run({}, live=True, steamspy=True, transport_factory=lambda: make_transport(fake),
+                  legacy_script=no_legacy, out=lines.append)
+    out = "\n".join(lines)
+    assert fake.calls[-1].host == "steamspy.com" and "key" not in fake.calls[-1].params
+    assert "[ OK ] SteamSpy appdetails: appid 620: 2 tag(s); top [('Puzzle', 9000), ('Co-op', 7000)]" in out

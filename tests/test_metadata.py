@@ -56,13 +56,21 @@ VERY_POSITIVE = {"query_summary": {"review_score": 8, "review_score_desc": "Very
                                    "total_positive": 450, "total_negative": 50, "total_reviews": 500}}
 
 
-def run(data=None, *, review=..., tags=(492, 19), tag_names=TAGS, tags_error=None):
+def item(is_early_access=False, **extra):
+    data = {"appid": 10, "success": 1, **extra}
+    if is_early_access is not ...:
+        data["is_early_access"] = is_early_access
+    return src("store_items", data)
+
+
+def run(data=None, *, review=..., tags=(492, 19), tag_names=TAGS, tags_error=None, store_item=...):
     return normalize(
         10,
         src("appdetails", details() if data is None else data),
         src("store_items", list(tags) if tags is not None else None, tags_error),
         tag_names,
         review_record(VERY_POSITIVE) if review is ... else review,
+        store_item=item() if store_item is ... else store_item,
     )
 
 
@@ -131,7 +139,7 @@ def _genres(*names):
 
 
 def test_genres_follow_legacy_order():
-    r = run(details(genres=_genres("RPG", "Early Access", "Racing", "Indie", "Action")))
+    r = run(details(genres=_genres("RPG", "Early Access", "Racing", "Indie", "Action")), store_item=item(True))
     assert cell(r, "genres") == "['Action', 'Indie', 'Racing', 'RPG', 'Early Access']"
     assert cell(r, "early_access") == "TRUE"
 
@@ -143,15 +151,64 @@ def test_genres_are_html_escaped_like_legacy():
 
 @pytest.mark.parametrize("genres", [..., [], None, "Action", [{"id": "1"}]])
 def test_missing_genres_leave_early_access_unverified(genres):
-    r = run(details(genres=genres))
+    r = run(details(genres=genres), store_item=item(...))
     assert cell(r, "genres") == "" and prov(r, "genres").status == m.MISSING
     assert cell(r, "early_access") == "" and prov(r, "early_access").status == m.UNVERIFIED
 
 
 def test_early_access_never_comes_from_tags():
-    r = run(details(genres=...), tags=[493])
+    r = run(details(genres=...), tags=[493], store_item=item(...))
     assert cell(r, "tags") == "['Early Access']"
     assert cell(r, "early_access") == ""
+
+
+EA = "Early Access"
+
+
+@pytest.mark.parametrize(
+    ("genres", "store_item", "cell_value", "status", "prov_status", "reason"),
+    [
+        # explicit store flag
+        (("Action",), item(False), "FALSE", m.EA_FALSE, m.PRESENT, "is_early_access=false"),
+        ((), item(False), "FALSE", m.EA_FALSE, m.PRESENT, "is_early_access=false"),
+        (("Action", EA), item(True), "TRUE", m.EA_TRUE, m.PRESENT, "is_early_access=true"),
+        ((), item(True), "TRUE", m.EA_TRUE, m.PRESENT, "is_early_access=true"),
+        # the genre is positive evidence on its own
+        (("Action", EA), item(...), "TRUE", m.EA_TRUE, m.PRESENT, "genre present; store item flag absent"),
+        (("Action", EA), None, "TRUE", m.EA_TRUE, m.PRESENT, "flag not_requested"),
+        # absence is never FALSE
+        (("Action",), item(...), "", m.EA_UNKNOWN, m.UNVERIFIED, "not treated as FALSE"),
+        (("Action",), None, "", m.EA_UNKNOWN, m.UNVERIFIED, "not treated as FALSE"),
+        ((), item(...), "", m.EA_UNKNOWN, m.UNVERIFIED, "store item: absent) and no genres"),
+        (("Action",), src("store_items", None), "", m.EA_UNKNOWN, m.UNVERIFIED, "store item: no_store_item"),
+        (("Action",), item("yes"), "", m.EA_UNKNOWN, m.UNVERIFIED, "store item: absent"),
+        # conflicts
+        (("Action", EA), item(False), "", m.EA_UNKNOWN, m.UNVERIFIED, "conflict"),
+        (("Action",), item(True), "", m.EA_UNKNOWN, m.UNVERIFIED, "conflict"),
+        # deciding source failed: unknown, and the row is retried later
+        (("Action",), src("store_items", error="SteamHTTPError: 503"), "", m.EA_UNKNOWN, m.SOURCE_UNAVAILABLE,
+         "store item: unavailable"),
+    ],
+)
+def test_early_access_three_states(genres, store_item, cell_value, status, prov_status, reason):
+    r = run(details(genres=_genres(*genres) if genres else ...), store_item=store_item)
+    assert cell(r, "early_access") == cell_value
+    p = prov(r, "early_access")
+    assert p.status == prov_status and reason.replace("genre present", "'Early Access' genre present") in p.note
+    assert r.extras["early_access"]["status"] == status
+    assert schema.validate_row(r.row) == []
+    assert r.complete is (prov_status != m.SOURCE_UNAVAILABLE)
+
+
+def test_early_access_evidence_records_sources():
+    r = run(details(genres=_genres("Action")), store_item=item(False))
+    ea = r.extras["early_access"]
+    assert ea == {
+        "early_access": "FALSE", "status": "false", "reason": "store item is_early_access=false",
+        "store_item_is_early_access": "false", "genres_early_access": "absent",
+        "store_item_url": "https://store.steampowered.com/store_items", "store_item_retrieved_at": AT,
+        "appdetails_url": "https://store.steampowered.com/appdetails", "appdetails_retrieved_at": AT,
+    }
 
 
 def test_genres_derived_order_matches_legacy_data(legacy_csv):
@@ -382,7 +439,8 @@ def test_provenance_records_source_time_and_raw_values():
 def test_provenance_statuses_cover_missing_fields():
     sparse = details(genres=..., developers=..., publishers=..., categories=..., price_overview=..., metacritic=...)
     r = run(sparse, review=review_record({"query_summary": {"review_score_desc": "No user reviews",
-                                         "total_positive": 0, "total_negative": 0, "total_reviews": 0}}), tags=[])
+                                         "total_positive": 0, "total_negative": 0, "total_reviews": 0}}), tags=[],
+            store_item=item(...))
     blanks = {p.field: p.status for p in r.provenance if p.value == ""}
     assert blanks == {
         "genres": m.MISSING, "developer": m.MISSING, "publisher": m.MISSING, "specs": m.MISSING, "tags": m.MISSING,
