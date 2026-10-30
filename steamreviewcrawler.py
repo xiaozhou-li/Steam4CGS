@@ -13,7 +13,8 @@ np.set_printoptions(linewidth=desired_width)
 pd.set_option('display.max_columns',25)
 
 pp = pprint.PrettyPrinter()
-
+steamAPIKey = '6FCFCE5E8A5859EFC0E182056B4E612E'
+mysteamid = '76561198060994479'
 features = ['recommendationid', 'review', 'timestamp_created', 'timestamp_updated', 'voted_up', 'votes_up', 'votes_funny', 'comment_count', 'author_steamid', 'author_num_games_owned', 'author_num_reviews', 'author_playtime_forever', 'author_playtime_last_two_weeks', 'author_last_played']
 
 #steamapi.core.APIConnection(api_key="6FCFCE5E8A5859EFC0E182056B4E612E", validate_key=True)  # <-- Insert API key here
