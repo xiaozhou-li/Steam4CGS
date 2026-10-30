@@ -25,5 +25,17 @@ python -m crawler run --resume           # continue after an interruption or --l
 python -m crawler run --appids-file F    # seed mode: specific AppIDs, no key needed for discovery
 ```
 
+Validation and reports:
+
+```sh
+python3.13 -m pytest                          # 664 offline tests (mocked Steam APIs, sockets blocked)
+python3.13 -m crawler validate                # re-check the outputs against the contract
+python3.13 -m crawler backtest --sample 25    # live: re-extract 25 original games, compare structure
+python3.13 -m crawler quality --run-tests     # writes reports/quality_report.md
+```
+
+Documentation: [data dictionary](docs/data_dictionary.md), [methodology](docs/methodology.md),
+[quality report](reports/quality_report.md).
+
 Outputs: `steamproducts2020_2026_new.csv`, `steamproducts2020_2026_merged.csv`,
 `steam_metadata_provenance.csv`, `crawl_manifest.json` and `work/failed_appids.csv`.

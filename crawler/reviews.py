@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from crawler import schema
-from crawler.discovery import write_csv_atomic
+from crawler.discovery import atomic_write_bytes, write_csv_atomic
 from crawler.discovery_state import iso
 from crawler.steam_api import WEB_API_BASE, SteamWebAPI, public_url
 from crawler.transport import RequestBudgetExceeded, SteamAuthError, SteamError, SteamRateLimitError
@@ -359,7 +359,6 @@ def export(state: ReviewState, out_dir: str | Path, settings: ReviewSettings) ->
         **state.meta(),
         "statuses": {s: sum(r.status == s for r in records.values()) for s in STATUSES},
     }
-    tmp = out / ".review_summaries.meta.json.tmp"
-    tmp.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(out / "review_summaries.meta.json")
+    atomic_write_bytes(out / "review_summaries.meta.json",
+                       (json.dumps(meta, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     return {"review_summaries": len(records)}

@@ -10,6 +10,8 @@ Pipeline commands (shared workspace: --base-dir, --work-dir, --legacy-csv):
     python -m crawler export    [--dry-run]
     python -m crawler validate
     python -m crawler run       (discover + crawl + export + validate; all of the options above)
+    python -m crawler backtest  [--sample N] [--seed S] [--appid N ...] [--refresh]
+    python -m crawler quality   [--run-tests]
 
 Lower-level tools: ``extract`` and ``reviews`` (see docs/metadata.md, docs/reviews.md).
 """
@@ -18,11 +20,15 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from crawler import discovery, extract, pipeline, preflight
+import subprocess
+import sys
+
+from crawler import backtest, discovery, extract, pipeline, preflight, quality
 from crawler import reviews as rv
 from crawler import steamspy as spy
 from crawler.credentials import InvalidCredentialError, load_api_key
@@ -137,6 +143,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="maximum lookups per stage (discovery appdetails, metadata, reviews) in this invocation")
     r.add_argument("--dry-run", action="store_true", help="show what would happen; no requests, no writes")
 
+    b = sub.add_parser("backtest", help="re-extract games from the original CSV and compare structure (live)")
+    _workspace_args(b)
+    b.add_argument("--sample", type=_non_negative, default=backtest.DEFAULT_SAMPLE,
+                   help="number of original games, stratified (default: %(default)s)")
+    b.add_argument("--seed", type=int, default=backtest.DEFAULT_SEED, help="sampling seed (default: %(default)s)")
+    b.add_argument("--appid", type=int, action="append", help="back-test these original AppIDs instead of a sample")
+    b.add_argument("--refresh", action="store_true", help="bypass the back-test response cache")
+    b.add_argument("--dry-run", action="store_true", help="print the sample; no requests")
+
+    q = sub.add_parser("quality", help="check the outputs and write reports/quality_report.md")
+    _workspace_args(q)
+    q.add_argument("--run-tests", action="store_true", help="run the offline test suite and include the result")
+    q.add_argument("--out", type=Path, help="report path (default: BASE/reports/quality_report.md)")
+
     x = sub.add_parser("extract", help="(lower level) fetch and normalize Store metadata for AppIDs")
     src = x.add_mutually_exclusive_group()
     src.add_argument("--input", type=Path, default=DEFAULT_OUT / "eligible.csv",
@@ -208,6 +228,10 @@ def run_pipeline_command(args: argparse.Namespace, environ: Mapping[str, str],
     try:
         if cmd == "audit":
             return pipeline.audit(ctx)
+        if cmd == "backtest":
+            return run_backtest(ctx, args)
+        if cmd == "quality":
+            return run_quality(ctx, args)
         if cmd == "validate":
             return pipeline.run_stage(ctx, "validate", lambda: pipeline.validate(ctx))
         if cmd == "export":
@@ -333,6 +357,52 @@ def run_extract(args: argparse.Namespace, environ: Mapping[str, str], transport:
                   f"{report.partial} partial, {report.failed} failed, {report.pending} pending, "
                   f"{len(report.skipped_legacy)} legacy skipped")
     return code
+
+
+def run_backtest(ctx: pipeline.Context, args: argparse.Namespace) -> int:
+    legacy_ids = ctx.legacy_ids()
+    if args.appid:
+        unknown = [a for a in args.appid if a not in legacy_ids]
+        if unknown:
+            raise ValueError(f"not in the original CSV: {unknown}")
+        sample = [(a, "explicit") for a in args.appid]
+    else:
+        sample = backtest.select_sample(ctx.ws.legacy_csv, args.sample, args.seed)
+    if args.dry_run:
+        print(f"dry run: would back-test {len(sample)} original game(s): " + ", ".join(f"{a}({s})" for a, s in sample))
+        return EXIT_OK
+
+    def go() -> int:
+        s = backtest.run_backtest(ctx, sample, refresh=args.refresh, seed=args.seed)
+        print(f"backtest: {s['extracted']}/{s['sample']} extracted, {s['rows_valid']} contract-valid, "
+              f"{s['unavailable']} unavailable, {s['requests_sent']} request(s)")
+        print(f"wrote {ctx.ws.base / 'reports' / 'backtest_comparison.csv'} and backtest_summary.json")
+        ctx.last_summary = {k: s[k] for k in ("sample", "extracted", "rows_valid", "unavailable")}
+        return EXIT_OK if s["rows_valid"] == s["extracted"] else EXIT_ERROR
+
+    return pipeline.run_stage(ctx, "backtest", go)
+
+
+def run_quality(ctx: pipeline.Context, args: argparse.Namespace) -> int:
+    ws = ctx.ws
+    for p in (ws.new_csv, ws.merged_csv, ws.provenance_csv, ws.manifest):
+        if not p.exists():
+            raise ValueError(f"{p} not found; run 'python -m crawler run' (or export) first")
+    checks = quality.check_outputs(ws)
+    summary_path = ws.base / "reports" / "backtest_summary.json"
+    bt = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else None
+    tests = None
+    if args.run_tests:
+        proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], cwd=pipeline.ROOT,
+                              capture_output=True, text=True)
+        summary_line = (proc.stdout.strip().splitlines() or ["no output"])[-1]
+        tests = f"python -m pytest -q: {summary_line} (exit code {proc.returncode})"
+    out = args.out or ws.base / "reports" / "quality_report.md"
+    pipeline._atomic_write_bytes(out, quality.render_report(ws, checks, backtest=bt, tests=tests).encode())
+    for c in checks:
+        print(f"[{'PASS' if c.ok else 'FAIL'}] {c.name}: {c.detail}")
+    print(f"wrote {out}")
+    return EXIT_OK if all(c.ok for c in checks) else EXIT_ERROR
 
 
 def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None = None,

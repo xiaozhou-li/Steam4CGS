@@ -125,6 +125,9 @@ class SampleSteam(BaseAdapter):
         super().__init__()
         # GetAppList catalog: appid -> last_modified (default: every sample app).
         self.catalog = dict(catalog) if catalog is not None else {a: 1_700_000_000 for a in APPDETAILS}
+        # Failure injection: callables (path, params) -> Response | (status, body) | bytes | None.
+        # The first one returning non-None answers the request; it may also raise.
+        self.overrides: list = []
         self.early_access = dict(STORE_ITEM_EARLY_ACCESS if early_access is None else early_access)
         self.steamspy = dict(STEAMSPY if steamspy is None else steamspy)
         self.review_params = review_params  # None: GetAppReviews not listed
@@ -143,10 +146,32 @@ class SampleSteam(BaseAdapter):
         resp.encoding, resp.url, resp.request = "utf-8", request.url, request
         return resp
 
+    def _respond_raw(self, request, status, content: bytes, content_type="text/html"):
+        resp = requests.Response()
+        resp.status_code = status
+        resp._content = content
+        resp._content_consumed = True
+        resp.headers = CaseInsensitiveDict({"Content-Type": content_type})
+        resp.encoding, resp.url, resp.request = "utf-8", request.url, request
+        return resp
+
     def send(self, request, **kwargs):
         url = urlsplit(request.url)
         params = {k: v[-1] for k, v in parse_qs(url.query).items()}
         self.calls.append((url.path, params))
+        for override in self.overrides:
+            answer = override(url.path, params)
+            if answer is None:
+                continue
+            if isinstance(answer, bytes):
+                return self._respond_raw(request, 200, answer)
+            if isinstance(answer, tuple):
+                status, body, *headers = answer
+                resp = self._respond(request, status, body)
+                if headers:
+                    resp.headers.update(headers[0])
+                return resp
+            return answer
         if url.path == "/IStoreService/GetAppList/v1/":
             after, size = int(params.get("last_appid", 0)), int(params["max_results"])
             since = int(params.get("if_modified_since", 0))

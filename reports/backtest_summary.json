@@ -1,0 +1,135 @@
+{
+  "columns": {
+    "app_name": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 24,
+      "n": 24,
+      "note": ""
+    },
+    "developer": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 20,
+      "n": 24,
+      "note": ""
+    },
+    "early_access": {
+      "blank_now": 19,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 4,
+      "n": 24,
+      "note": "blank = unknown (no explicit store flag)"
+    },
+    "genres": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 17,
+      "n": 24,
+      "note": "95% of current labels exist in the 2020 vocabulary"
+    },
+    "id": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 24,
+      "n": 24,
+      "note": ""
+    },
+    "metascore": {
+      "blank_now": 20,
+      "blank_then": 20,
+      "compatible": 24,
+      "equal": 24,
+      "n": 24,
+      "note": ""
+    },
+    "price": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 15,
+      "n": 24,
+      "note": "median change +0 USD"
+    },
+    "publisher": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 16,
+      "n": 24,
+      "note": "2020 'Franchise:' suffixes are not reproduced"
+    },
+    "release_date": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 16,
+      "n": 24,
+      "note": "2020 free text=2; date differs=6; same date=16"
+    },
+    "sentiment": {
+      "blank_now": 24,
+      "blank_then": 6,
+      "compatible": 24,
+      "equal": 6,
+      "n": 24,
+      "note": "review summaries unavailable without a key"
+    },
+    "specs": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 0,
+      "n": 24,
+      "note": "71% of current labels exist in the 2020 vocabulary"
+    },
+    "tags": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 3,
+      "n": 24,
+      "note": "95% of current labels exist in the 2020 vocabulary"
+    },
+    "title": {
+      "blank_now": 0,
+      "blank_then": 0,
+      "compatible": 24,
+      "equal": 24,
+      "n": 24,
+      "note": ""
+    }
+  },
+  "extracted": 24,
+  "partial_rows": 0,
+  "price_rule_evidence": {
+    "both": 0,
+    "floor_only": 5,
+    "neither": 4,
+    "round_only": 8
+  },
+  "requests_sent": 1,
+  "reviews_note": "IUserReviewsService/GetAppReviews/v1 is not available to this key (no STEAM_API_KEY set: only public methods are listed)",
+  "rows_serializable": 24,
+  "rows_valid": 24,
+  "run_at": "2026-10-30T04:48:29Z",
+  "sample": 25,
+  "seed": 2020,
+  "strata": {
+    "early_access": 4,
+    "few_reviews": 4,
+    "free": 4,
+    "free_text_date": 4,
+    "metascore": 4,
+    "random": 5
+  },
+  "unavailable": 1,
+  "unavailable_reasons": [
+    "263280: store_details_unavailable"
+  ]
+}

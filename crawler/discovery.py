@@ -283,6 +283,22 @@ def decide_all(state: DiscoveryState, window: DateWindow, legacy_ids: frozenset[
         yield app, decision, stored, failure
 
 
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write via a sibling ``.<name>.tmp``, fsync, then rename; the temp file never outlives a failure."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def write_csv_atomic(path: Path, fields: Sequence[str], rows: Iterable[dict]) -> None:
     """Write a CRLF CSV via a sibling temp file and an atomic rename."""
     tmp = path.with_name(f".{path.name}.tmp")
@@ -357,9 +373,7 @@ def export(state: DiscoveryState, out_dir: str | Path, run: Run, legacy_ids: fro
         "counts": {"discovered": len(discovered), **{s: counts[s] for s in (ELIGIBLE, EXCLUDED, FAILED, PENDING)}},
         "reasons": dict(sorted(reasons.items())),
     }
-    tmp = out / ".summary.json.tmp"
-    tmp.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, out / "summary.json")
+    atomic_write_bytes(out / "summary.json", (json.dumps(summary, indent=2) + "\n").encode("utf-8"))
     if report is not None:
         report.counts, report.reasons = summary["counts"], summary["reasons"]
     return summary["counts"]

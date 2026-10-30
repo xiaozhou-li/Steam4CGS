@@ -146,18 +146,7 @@ def workspace_lock(ws: Workspace):
         os.close(fd)  # closing releases the lock
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    try:
-        with open(tmp, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+_atomic_write_bytes = discovery.atomic_write_bytes
 
 
 def _now() -> dt.datetime:
@@ -679,6 +668,11 @@ def _row_count(path: Path, out: Mapping[str, Any]) -> int:
 # --------------------------------------------------------------------------
 
 
+def _appid(cell: str) -> int:
+    """AppID of a cell, or -1 when it is not a number (the contract check reports it)."""
+    return int(cell) if cell.isdigit() else -1
+
+
 def validate(ctx: Context) -> int:
     ws, log = ctx.ws, ctx.log
     problems: list[str] = []
@@ -718,7 +712,7 @@ def validate(ctx: Context) -> int:
     merged_rows = list(csv.reader(io.StringIO(merged_bytes.decode("utf-8"), newline="")))
     check(merged_rows[:len(legacy_rows)] == legacy_rows, "merged CSV legacy rows differ")
     check(merged_rows[len(legacy_rows):] == new_rows, "merged CSV appended rows differ from the new CSV")
-    merged_ids = [int(r[0]) for r in merged_rows[1:]]
+    merged_ids = [_appid(r[0] if r else "") for r in merged_rows[1:]]
     check(len(merged_ids) == len(set(merged_ids)), "merged CSV has duplicate AppIDs")
     for v in schema.validate_file(ws.merged_csv)[:10]:
         problems.append(f"merged CSV: {v}")
@@ -727,8 +721,9 @@ def validate(ctx: Context) -> int:
     with open(ws.provenance_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         check(tuple(reader.fieldnames or ()) == PROVENANCE_FIELDS, "provenance header differs")
-        prov = {(int(r["appid"]), r["field"]): r for r in reader}
-    expected = {(int(r[0]), c): r[i] for r in new_rows for i, c in enumerate(schema.COLUMNS)}
+        prov = {(_appid(r["appid"]), r["field"]): r for r in reader}
+    expected = {(_appid(r[0]), c): r[i] for r in new_rows if len(r) == len(schema.COLUMNS)
+                for i, c in enumerate(schema.COLUMNS)}
     check(set(prov) == set(expected), f"provenance covers {len(prov)} cells, expected {len(expected)}")
     bad = [k for k, v in expected.items() if k in prov and prov[k]["value"] != v]
     check(not bad, f"provenance values disagree with the new CSV: {bad[:5]}")
@@ -748,7 +743,7 @@ def validate(ctx: Context) -> int:
     with open(ws.failed_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         check(tuple(reader.fieldnames or ()) == FAILED_FIELDS, "failed_appids.csv header differs")
-        metadata_failed = {int(r["appid"]) for r in reader if r["stage"] == "crawl:metadata"}
+        metadata_failed = {_appid(r["appid"]) for r in reader if r["stage"] == "crawl:metadata"}
     check(not metadata_failed & set(new_ids), "an AppID is both in the new CSV and failed at the metadata stage")
 
     log(f"validate: new={len(new_rows)} merged={len(merged_rows) - 1} provenance={len(prov)}")

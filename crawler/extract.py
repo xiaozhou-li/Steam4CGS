@@ -348,8 +348,12 @@ def export(state: ExtractionState, out_dir: str | Path,
     reviews = reviews or {}
     stored = [with_review(row, prov, reviews.get(int(row["id"]))) for row, prov in state.rows()]
     games_tmp = out / ".games.csv.tmp"
-    schema.write_rows(games_tmp, [row for row, _ in stored], overwrite=True)
-    os.replace(games_tmp, out / "games.csv")
+    try:
+        schema.write_rows(games_tmp, [row for row, _ in stored], overwrite=True)  # validates every row
+        os.replace(games_tmp, out / "games.csv")
+    except BaseException:
+        games_tmp.unlink(missing_ok=True)
+        raise
     write_csv_atomic(out / "provenance.csv", PROVENANCE_FIELDS, (p for _, prov in stored for p in prov))
     write_csv_atomic(out / "prices.csv", PRICE_FIELDS,
                      (price_row(p) for _, prov in stored for p in prov if p["field"] == "price"))
