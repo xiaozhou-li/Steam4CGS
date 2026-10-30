@@ -11,3 +11,11 @@ pytest
 ```
 
 Tests never touch the network and verify the legacy CSV is unmodified.
+
+Steam API clients and their limits are described in [docs/steam_api.md](docs/steam_api.md).
+
+```sh
+export STEAM_API_KEY=...             # from https://steamcommunity.com/dev/apikey; never commit it
+python -m crawler preflight          # offline configuration check
+python -m crawler preflight --live   # at most 6 real requests for one app id
+```

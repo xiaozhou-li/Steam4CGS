@@ -7,10 +7,13 @@ name = "steam4cgs-crawler"
 version = "0.1.0"
 description = "Collect Steam game metadata compatible with the legacy steamproducts2020.csv schema"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["requests>=2.31,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+
+[project.scripts]
+steam4cgs = "crawler.cli:main"
 
 [tool.setuptools]
 packages = ["crawler"]
