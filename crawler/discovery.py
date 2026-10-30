@@ -76,8 +76,14 @@ class DiscoveryOptions:
     recheck_unreleased: bool = False
     page_size: int = DEFAULT_PAGE_SIZE
     max_consecutive_failures: int = 5
+    # Seed mode: evaluate exactly these AppIDs instead of paging GetAppList (no key needed).
+    seed_appids: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.seed_appids is not None and self.incremental:
+            raise ValueError("seed AppIDs and --incremental are mutually exclusive")
+        if self.seed_appids is not None and any(a <= 0 for a in self.seed_appids):
+            raise ValueError("seed AppIDs must be positive")
         if self.limit is not None and self.limit < 0:
             raise ValueError("limit must be >= 0")
         if self.resume and self.restart:
@@ -145,7 +151,10 @@ class Discovery:
                 "pass --resume to continue it or --restart to abandon it")
 
         window = opts.window or DateWindow(DEFAULT_START, self._today())
-        # A new run always starts with the catalog, so fail on a missing key before recording it.
+        if opts.seed_appids is not None:
+            return self.state.start_run(window=window, mode="seed", if_modified_since=None,
+                                        recheck_unreleased=opts.recheck_unreleased, now=self._now())
+        # A new catalog run always starts with GetAppList, so fail on a missing key before recording it.
         self._web = self._web or self._web_factory()
         if_modified_since = None
         if opts.incremental:
@@ -164,12 +173,18 @@ class Discovery:
         self._log(f"run #{run.run_id}: mode={run.mode} window={run.window}"
                   + (f" if_modified_since={run.if_modified_since}" if run.if_modified_since is not None else ""))
         if not run.catalog_complete:
-            self._crawl_catalog(run, opts, report)
+            if run.mode == "seed":
+                if opts.seed_appids is None:
+                    raise DiscoveryConfigError(f"run #{run.run_id} is a seed run; resume it with the same AppIDs")
+                self.state.save_seeds(run.run_id, dict.fromkeys(opts.seed_appids), self._now())
+                self._log(f"seed mode: {len(set(opts.seed_appids))} AppID(s), GetAppList not used")
+            else:
+                self._crawl_catalog(run, opts, report)
             run = self.state.get_run(run.run_id)
         self._evaluate(run, opts, report)
 
         report.new_apps = self.state.count_first_seen(run.run_id)
-        report.pending = len(self.state.pending(run, self.legacy_ids))
+        report.pending = len(self._pending(run, opts))
         if report.stop_reason == COMPLETE and report.pending:
             report.stop_reason = LIMIT_REACHED  # safety net: never finish a run with work left
         if report.stop_reason == COMPLETE:
@@ -201,8 +216,15 @@ class Discovery:
 
     # -- phase 2: metadata -------------------------------------------------------------
 
-    def _evaluate(self, run: Run, opts: DiscoveryOptions, report: RunReport) -> None:
+    def _pending(self, run: Run, opts: DiscoveryOptions) -> list[tuple[int, int | None]]:
         pending = self.state.pending(run, self.legacy_ids)
+        if run.mode == "seed" and opts.seed_appids is not None:
+            seeds = set(opts.seed_appids)
+            pending = [p for p in pending if p[0] in seeds]
+        return pending
+
+    def _evaluate(self, run: Run, opts: DiscoveryOptions, report: RunReport) -> None:
+        pending = self._pending(run, opts)
         self._log(f"{len(pending)} app(s) need appdetails")
         consecutive_failures = 0
         for appid, last_modified in pending:
@@ -269,6 +291,8 @@ def write_csv_atomic(path: Path, fields: Sequence[str], rows: Iterable[dict]) ->
             writer = csv.DictWriter(f, fieldnames=fields, lineterminator="\r\n")
             writer.writeheader()
             writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())  # the rename must never expose a partially written file
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)

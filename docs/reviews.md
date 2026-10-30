@@ -2,7 +2,7 @@
 
 ```sh
 export STEAM_API_KEY=...
-python -m crawler reviews                          # every AppID in data/discovery/eligible.csv
+python -m crawler reviews                          # every AppID in work/discovery/eligible.csv
 python -m crawler reviews --limit 100              # checkpointed; run again to continue
 python -m crawler reviews --appid 620              # specific AppIDs
 python -m crawler reviews --language english --purchase-type steam
@@ -67,7 +67,7 @@ A response becomes `status=ok`, and its label becomes the legacy
 invocation (exit code 75) and leaves the game pending, not failed. A 401 or
 403 stops the run as an authorization error.
 
-## Outputs (`data/reviews/`)
+## Outputs (`work/reviews/`)
 
 **`review_summaries.csv`** holds the numeric statistics, separate from
 `games.csv`. Its columns are `appid, status, sentiment, review_score_desc,

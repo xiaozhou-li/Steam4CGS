@@ -1,0 +1,36 @@
+# Pilot seed AppIDs (30), hand-picked because STEAM_API_KEY was not available for
+# IStoreService/GetAppList discovery. The names are what the AppIDs were *expected*
+# to be when chosen; eligibility is decided only from live Store metadata.
+#
+# Expected new games (2020+, not in steamproducts2020.csv)
+1245620   # ELDEN RING
+892970    # Valheim (Early Access)
+1086940   # Baldur's Gate 3
+1172470   # Apex Legends
+1203220   # NARAKA: BLADEPOINT
+1517290   # Battlefield 2042
+1794680   # Vampire Survivors
+1966720   # Lethal Company (Early Access)
+553850    # HELLDIVERS 2
+2358720   # Black Myth: Wukong
+1623730   # Palworld (Early Access)
+2050650   # Resident Evil 4
+990080    # Hogwarts Legacy
+1817070   # Marvel's Spider-Man Remastered
+1593500   # God of War
+1145350   # Hades II
+1325200   # Nioh 2 - The Complete Edition
+1326470   # Sons Of The Forest
+2379780   # Balatro
+1817190   # Marvel's Spider-Man: Miles Morales
+2420110   # Horizon Forbidden West Complete Edition
+1888930   # The Last of Us Part I
+2183900   # Warhammer 40,000: Space Marine 2
+# Expected exclusions
+2138330   # Cyberpunk 2077: Phantom Liberty (DLC)
+1145360   # Hades (already in steamproducts2020.csv)
+1091500   # Cyberpunk 2077 (already in steamproducts2020.csv)
+255710    # Cities: Skylines (already in steamproducts2020.csv)
+632470    # Disco Elysium (already in steamproducts2020.csv)
+271590    # Grand Theft Auto V (already in steamproducts2020.csv)
+1174180   # Red Dead Redemption 2 (already in steamproducts2020.csv)

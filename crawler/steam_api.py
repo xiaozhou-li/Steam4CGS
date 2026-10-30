@@ -11,12 +11,14 @@ The key is sent only to that host; the Store client never receives it.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
+from crawler.cache import ResponseCache, cache_key
 from crawler.credentials import ApiKey, MissingCredentialError
 from crawler.transport import SteamResponseError, SteamTransport
 
@@ -286,6 +288,25 @@ def store_item_tag_weights(item: Mapping[str, Any]) -> list[tuple[int, int | Non
 # --------------------------------------------------------------------------
 
 
+# appdetails fields the pipeline reads (eligibility + metadata). Only these are
+# cached, which keeps the cache small (descriptions and media are dropped).
+APPDETAILS_CACHED_FIELDS = (
+    "type", "name", "steam_appid", "is_free", "developers", "publishers", "genres", "categories",
+    "price_overview", "release_date", "metacritic", "fullgame", "achievements",
+)
+DEFAULT_APPDETAILS_TTL = dt.timedelta(hours=72)
+
+
+@dataclass(frozen=True)
+class Fetched:
+    """A response with where and when it was obtained."""
+
+    data: Any
+    url: str
+    retrieved_at: str
+    from_cache: bool
+
+
 class SteamStoreAPI:
     """``store.steampowered.com/api/appdetails``.
 
@@ -293,24 +314,52 @@ class SteamStoreAPI:
     notice, so callers must treat every field in ``data`` as optional. The
     API key is never sent here. ``cc=us`` and ``l=english`` match the
     legacy CSV's USD prices and English genre names.
+
+    With a ``cache``, successful answers (including ``success: false``) are
+    reused for ``ttl``; a hit reports the original retrieval time.
     """
 
-    def __init__(self, transport: SteamTransport, *, country: str = "us", language: str = "english"):
+    def __init__(self, transport: SteamTransport, *, country: str = "us", language: str = "english",
+                 cache: ResponseCache | None = None, ttl: dt.timedelta = DEFAULT_APPDETAILS_TTL,
+                 now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc)):
         self._transport = transport
         self.country = country
         self.language = language
+        self._cache = cache
+        self._ttl = ttl
+        self._now = now
+        self.network_requests = 0
 
     def get_app_details(self, appid: int, *, country: str | None = None, language: str | None = None) -> dict | None:
         """Return the ``data`` object for one app, or ``None`` when Steam reports ``success: false``
         (unknown, removed or region-locked app)."""
+        return self.fetch_app_details(appid, country=country, language=language).data
+
+    def fetch_app_details(self, appid: int, *, country: str | None = None, language: str | None = None,
+                          refresh: bool = False) -> Fetched:
+        """Like :meth:`get_app_details`, with the request URL and retrieval time (cache-aware)."""
         url, params = appdetails_request(_check_appid(appid), country or self.country, language or self.language)
+        shown = public_url(url, params)
+        key = cache_key(url, params)
+        if self._cache is not None and not refresh:
+            hit = self._cache.get(key, now=self._now(), ttl=self._ttl)
+            if hit is not None:
+                data, retrieved_at = hit
+                return Fetched(data, shown, retrieved_at, from_cache=True)
+        self.network_requests += 1
         body = self._transport.get_json(url, params)
         if body is None:
             raise SteamResponseError("appdetails returned null (this often indicates throttling)")
         entry = _expect_dict(_expect_dict(body, "appdetails").get(str(appid)), f"appdetails[{appid}]")
         success = entry.get("success")
         if success is False:
-            return None
-        if success is not True:
+            data = None
+        elif success is not True:
             raise SteamResponseError(f"appdetails[{appid}] has no boolean 'success'")
-        return _expect_dict(entry.get("data"), f"appdetails[{appid}] 'data'")
+        else:
+            data = _expect_dict(entry.get("data"), f"appdetails[{appid}] 'data'")
+        retrieved_at = self._now().astimezone(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        if self._cache is not None:
+            trimmed = None if data is None else {k: data[k] for k in APPDETAILS_CACHED_FIELDS if k in data}
+            self._cache.put(key, trimmed, retrieved_at)
+        return Fetched(data, shown, retrieved_at, from_cache=False)

@@ -1,7 +1,7 @@
 # Store metadata extraction
 
 ```sh
-python -m crawler extract                         # every AppID in data/discovery/eligible.csv
+python -m crawler extract                         # every AppID in work/discovery/eligible.csv
 python -m crawler extract --limit 25              # checkpointed; run again to continue
 python -m crawler extract --appid 620 --appid 730 # specific AppIDs
 python -m crawler extract --refresh               # re-fetch AppIDs already extracted
@@ -27,7 +27,7 @@ checkpoints and export). AppIDs in `steamproducts2020.csv` are refused.
 * `STEAM_API_KEY` is optional here. If it is set, it is sent only to
   `api.steampowered.com`.
 * **`extract` never requests reviews.** Every export reads the review
-  state (`--reviews-state`, default `data/reviews/state.sqlite3`). Running
+  state (`--reviews-state`, default `work/reviews.sqlite3`). Running
   `extract` again after `reviews` refreshes `sentiment` with no new
   requests for apps already extracted.
 
@@ -73,7 +73,7 @@ is used as follows:
 | HTTP error, timeout or non-JSON | `source_unavailable`, and the row is retried on the next run |
 
 * **Cache:** responses are cached in `--steamspy-cache` (default
-  `data/steamspy/cache.sqlite3`) for `--steamspy-ttl-hours` (default 24),
+  `work/cache/steamspy.sqlite3`) for `--steamspy-ttl-hours` (default 24),
   because SteamSpy refreshes its data daily.
   * A cached answer keeps its **original** `retrieved_at`, and the
     provenance note says it was served from the cache.
@@ -153,7 +153,7 @@ rounding inferred from the legacy file (`docs/legacy_schema.md` §3.2).
 * No `price_overview` and not free (not purchasable, or the price is hidden)
   gives a blank.
 
-## Outputs (`data/metadata/`, set with `--out`)
+## Outputs (`work/metadata/`, set with `--out`)
 
 | File | Contents |
 |---|---|
@@ -185,7 +185,7 @@ More about provenance fields:
 ## Checkpointing and retries
 
 Each AppID's row and provenance are committed to SQLite (`--state`, default
-`data/metadata/state.sqlite3`). Later invocations process AppIDs in this
+`work/metadata.sqlite3`). Later invocations process AppIDs in this
 order:
 
 1. AppIDs never attempted;

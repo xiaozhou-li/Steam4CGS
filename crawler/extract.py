@@ -191,6 +191,7 @@ class Extractor:
         self.legacy_ids = legacy_ids
         self._now = now
         self._log = log
+        self._refresh = False
         self._tag_names: dict[int, str] | None = None
         self._tag_names_error: str | None = None
 
@@ -218,8 +219,7 @@ class Extractor:
     def extract_one(self, appid: int) -> SourceResult | None:
         """Fetch all sources for one app and store the result. Returns the failed appdetails source, if any."""
         cc, lang = self.store.country, self.store.language
-        details = self._source("appdetails", appdetails_request(appid, cc, lang),
-                               lambda: self.store.get_app_details(appid))
+        details = self._details(appid)
         if not details.ok:
             self.state.fail(appid, "appdetails_error", details.error or "", self._now())
             return details
@@ -239,6 +239,18 @@ class Extractor:
             return None
         self.state.save(extracted.row, extracted.provenance, extracted.complete, self._now(), extracted.extras)
         return None
+
+    def _details(self, appid: int) -> SourceResult:
+        """appdetails via the Store client's response cache (bypassed with refresh)."""
+        url = public_url(*appdetails_request(appid, self.store.country, self.store.language))
+        try:
+            fetched = self.store.fetch_app_details(appid, refresh=self._refresh)
+        except (SteamRateLimitError, RequestBudgetExceeded):
+            raise
+        except SteamError as exc:
+            return SourceResult("appdetails", url, iso(self._now()), error=f"{type(exc).__name__}: {exc}")
+        return SourceResult("appdetails", fetched.url, fetched.retrieved_at, data=fetched.data,
+                            cached=fetched.from_cache)
 
     @staticmethod
     def _steam_tags(item: SourceResult) -> SourceResult:
@@ -264,6 +276,7 @@ class Extractor:
 
     def run(self, appids: Iterable[int], *, limit: int | None = None, refresh: bool = False) -> ExtractReport:
         report = ExtractReport()
+        self._refresh = refresh
         wanted = list(dict.fromkeys(appids))
         report.requested = len(wanted)
         report.skipped_legacy = [a for a in wanted if a in self.legacy_ids]

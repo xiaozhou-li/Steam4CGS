@@ -486,33 +486,43 @@ def _legacy_csv(path, appids):
     return path
 
 
+def _ws_args(tmp_path, legacy):
+    return ["--base-dir", str(tmp_path), "--work-dir", str(tmp_path / "work"), "--legacy-csv", str(legacy)]
+
+
 def test_cli_discover_end_to_end(tmp_path, clock, capsys):
     legacy = _legacy_csv(tmp_path / "legacy.csv", [2])
     service = FakeSteamService(apps=[1, 2, 3], details={3: game(3, "1 Jun, 2019")})
-    args = cli.build_parser().parse_args([
-        "discover", "--state", str(tmp_path / "s.sqlite3"), "--out", str(tmp_path / "out"),
-        "--legacy-csv", str(legacy), "--end", "2026-10-30", "--page-size", "2",
-    ])
-    code = cli.run_discover(args, {"STEAM_API_KEY": FAKE_KEY}, transport=make_transport(service, clock))
+    argv = ["discover", *_ws_args(tmp_path, legacy), "--end-date", "2026-10-30", "--page-size", "2"]
+    code = cli.main(argv, environ={"STEAM_API_KEY": FAKE_KEY}, transport=make_transport(service, clock))
     out = capsys.readouterr().out
     assert code == 0, out
     assert "eligible=1" in out and "excluded=2" in out and FAKE_KEY not in out
-    assert ids(read(tmp_path, "eligible")) == [1]
-    assert {r["reason"] for r in read(tmp_path, "excluded")} == {e.IN_LEGACY_DATASET, e.RELEASED_BEFORE_WINDOW}
+    work = tmp_path / "work" / "discovery"
+    with open(work / "eligible.csv", newline="", encoding="utf-8") as f:
+        assert [int(r["appid"]) for r in csv.DictReader(f)] == [1]
+    with open(work / "excluded.csv", newline="", encoding="utf-8") as f:
+        assert {r["reason"] for r in csv.DictReader(f)} == {e.IN_LEGACY_DATASET, e.RELEASED_BEFORE_WINDOW}
     assert len(service.catalog_calls) == 2
 
 
 def test_cli_discover_without_key_fails_cleanly(tmp_path, clock, capsys):
     legacy = _legacy_csv(tmp_path / "legacy.csv", [2])
-    args = cli.build_parser().parse_args([
-        "discover", "--state", str(tmp_path / "s.sqlite3"), "--out", str(tmp_path / "out"), "--legacy-csv", str(legacy),
-    ])
-    code = cli.run_discover(args, {}, transport=make_transport(FakeSteamService(apps=[1]), clock))
+    code = cli.main(["discover", *_ws_args(tmp_path, legacy)], environ={},
+                    transport=make_transport(FakeSteamService(apps=[1]), clock))
     assert code == cli.EXIT_ERROR and "STEAM_API_KEY is not set" in capsys.readouterr().out
+
+
+def test_cli_seed_discovery_needs_no_key(tmp_path, clock, capsys):
+    legacy = _legacy_csv(tmp_path / "legacy.csv", [2])
+    service = FakeSteamService(details={3: game(3, "1 Jun, 2019")})
+    code = cli.main(["discover", *_ws_args(tmp_path, legacy), "--appid", "1", "--appid", "2", "--appid", "3",
+                     "--end-date", "2026-10-30"], environ={}, transport=make_transport(service, clock))
+    assert code == 0, capsys.readouterr().out
+    assert service.catalog_calls == [] and sorted(service.details_calls) == [1, 3]  # legacy 2 never fetched
 
 
 def test_cli_rejects_inverted_window(tmp_path, clock, capsys):
     legacy = _legacy_csv(tmp_path / "legacy.csv", [2])
-    args = cli.build_parser().parse_args(["discover", "--start", "2025-01-01", "--end", "2024-01-01",
-                                          "--state", str(tmp_path / "s"), "--legacy-csv", str(legacy)])
-    assert cli.run_discover(args, {}) == cli.EXIT_USAGE
+    argv = ["discover", *_ws_args(tmp_path, legacy), "--start-date", "2025-01-01", "--end-date", "2024-01-01"]
+    assert cli.main(argv, environ={}) == cli.EXIT_USAGE

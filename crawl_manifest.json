@@ -1,0 +1,136 @@
+{
+  "crawl": {
+    "early_access_status": {
+      "true": 1,
+      "unknown": 22
+    },
+    "eligible": 23,
+    "eligible_not_yet_crawled": 0,
+    "new_games": 23,
+    "tags_source": {
+      "steam": 23
+    }
+  },
+  "discovery": {
+    "counts": {
+      "eligible": 23,
+      "excluded": 7
+    },
+    "finished_at": "2026-10-30T03:32:06Z",
+    "mode": "seed",
+    "run_id": 1,
+    "started_at": "2026-10-30T03:31:30Z",
+    "status": "finished"
+  },
+  "generated_at": "2026-10-30T03:32:33Z",
+  "intermediate": {
+    "discovery": "work/discovery",
+    "early_access": "work/metadata/early_access.csv",
+    "prices": "work/metadata/prices.csv",
+    "review_statistics": "work/reviews/review_summaries.csv",
+    "tag_votes": "work/metadata/tag_votes.csv"
+  },
+  "legacy": {
+    "path": "steamproducts2020.csv",
+    "preserved_in_merged": true,
+    "rows": 23034,
+    "sha256": "3a7b7bd5b59565440d05c543557607b498c45590ebddc3f3e7a77afe9d095be8"
+  },
+  "limitations": [
+    "Store appdetails and appreviews-style endpoints are undocumented and may change without notice.",
+    "Prices are whole USD from the regular listing price (cc=us); currency and amounts are in provenance.",
+    "Release dates are kept verbatim when the store gives less than a full date; no day is invented.",
+    "early_access is blank (unknown) unless the Store states it explicitly; absence is never FALSE.",
+    "sentiment is filled only from verified IUserReviewsService/GetAppReviews summaries.",
+    "tags are blank when the selected source has none; genres are never substituted.",
+    "publisher never carries the legacy 'Franchise:' suffix (not exposed by appdetails).",
+    "SteamSpy (optional) is a third-party estimate service and can lag the store."
+  ],
+  "outputs": {
+    "steam_metadata_provenance.csv": {
+      "rows": 299,
+      "sha256": "5cf8e94afa62b3cf42fabd76f9340dc4b088395384e0dd3b38a0290207290a52"
+    },
+    "steamproducts2020_2026_merged.csv": {
+      "rows": 23057,
+      "sha256": "8a18bde53606da19646dc3216f84275e1dd2022986fff568aa4a45acb4c22a87"
+    },
+    "steamproducts2020_2026_new.csv": {
+      "rows": 23,
+      "sha256": "06832f74294c89039bfe561f9578e40da084caf06f98637992da88788d7769e4"
+    },
+    "work/failed_appids.csv": {
+      "rows": 0,
+      "sha256": "4536db9d19c37968e0ce8e70358b96dd52365055438e87a46f1e00e9bfee505c"
+    }
+  },
+  "reviews": {
+    "endpoint": "IUserReviewsService/GetAppReviews/v1",
+    "sentiment_filled": 0,
+    "settings": [],
+    "statuses": {}
+  },
+  "sources": {
+    "catalog": "https://api.steampowered.com/IStoreService/GetAppList/v1/ (key required)",
+    "metadata": "https://store.steampowered.com/api/appdetails (cc=us, l=english; undocumented)",
+    "reviews": "https://api.steampowered.com/IUserReviewsService/GetAppReviews/v1/",
+    "steamspy": "https://steamspy.com/api.php?request=appdetails (optional, third party)",
+    "store_item": "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/ (tags, is_early_access)",
+    "tag_names": "https://api.steampowered.com/IStoreService/GetTagList/v1/"
+  },
+  "stages": {
+    "crawl": {
+      "finished_at": "2026-10-30T03:32:33Z",
+      "started_at": "2026-10-30T03:32:06Z",
+      "state": "finished",
+      "summary": {
+        "eligible": 23,
+        "exit_code": 0,
+        "metadata": {
+          "appdetails_network_requests": 0,
+          "attempted": 23,
+          "extracted": 23,
+          "failed": 0,
+          "partial": 0,
+          "pending": 0,
+          "requested": 23,
+          "skipped_legacy": [],
+          "stop_reason": "complete"
+        },
+        "requests_sent": 49,
+        "reviews": {
+          "available": false,
+          "reason": "IUserReviewsService/GetAppReviews/v1 is not available to this key (no STEAM_API_KEY set: only public methods are listed)"
+        },
+        "tags_source": "steam"
+      }
+    },
+    "discover": {
+      "finished_at": "2026-10-30T03:32:06Z",
+      "started_at": "2026-10-30T03:31:30Z",
+      "state": "finished",
+      "summary": {
+        "exit_code": 0,
+        "lookups": 24,
+        "requests_sent": 24,
+        "stop_reason": "complete"
+      }
+    },
+    "export": {
+      "started_at": "2026-10-30T03:32:33Z",
+      "state": "running",
+      "summary": {}
+    }
+  },
+  "tool": {
+    "git_commit": "cedca8dbc1e08ab2372040b219d7c7cf1caa0fba",
+    "name": "steam4cgs-crawler",
+    "python": "3.13.2",
+    "requests": "2.32.2",
+    "version": "0.1.0"
+  },
+  "window": {
+    "end": "2026-10-30",
+    "start": "2020-01-01"
+  }
+}

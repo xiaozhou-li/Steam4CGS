@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (
     run_id             INTEGER PRIMARY KEY AUTOINCREMENT,
     status             TEXT NOT NULL CHECK (status IN ('running', 'finished', 'abandoned')),
-    mode               TEXT NOT NULL CHECK (mode IN ('full', 'incremental')),
+    mode               TEXT NOT NULL CHECK (mode IN ('full', 'incremental', 'seed')),
     window_start       TEXT NOT NULL,
     window_end         TEXT NOT NULL,
     recheck_unreleased INTEGER NOT NULL,
@@ -183,8 +183,14 @@ class DiscoveryState:
             "SELECT * FROM runs WHERE status = 'running' ORDER BY run_id DESC LIMIT 1").fetchone())
 
     def last_finished_run(self) -> Run | None:
+        """The last finished catalog run (seed runs never set an incremental starting point)."""
         return self._run(self._db.execute(
-            "SELECT * FROM runs WHERE status = 'finished' ORDER BY run_id DESC LIMIT 1").fetchone())
+            "SELECT * FROM runs WHERE status = 'finished' AND mode != 'seed' ORDER BY run_id DESC LIMIT 1").fetchone())
+
+    def latest_run(self) -> Run | None:
+        """The most recent run that was not abandoned (its window defines current eligibility)."""
+        return self._run(self._db.execute(
+            "SELECT * FROM runs WHERE status != 'abandoned' ORDER BY run_id DESC LIMIT 1").fetchone())
 
     def start_run(self, *, window: DateWindow, mode: str, if_modified_since: int | None,
                   recheck_unreleased: bool, now: dt.datetime) -> Run:
@@ -226,6 +232,23 @@ class DiscoveryState:
                    WHERE run_id = ?""",
                 (cursor, int(complete), run_id),
             )
+
+    def save_seeds(self, run_id: int, appids: Iterable[int], now: dt.datetime) -> None:
+        """Register explicitly requested AppIDs (seed mode) and mark the catalog phase done.
+
+        Existing rows keep their catalog name and last_modified.
+        """
+        stamp = iso(now)
+        with self._db:
+            self._db.executemany(
+                """INSERT INTO discovered (appid, name, last_modified, price_change_number,
+                                           first_seen_run, last_seen_run, first_seen_at, last_seen_at)
+                   VALUES (?, '', NULL, NULL, ?, ?, ?, ?)
+                   ON CONFLICT(appid) DO UPDATE SET last_seen_run = excluded.last_seen_run,
+                                                    last_seen_at = excluded.last_seen_at""",
+                [(a, run_id, run_id, stamp, stamp) for a in appids],
+            )
+            self._db.execute("UPDATE runs SET catalog_complete = 1 WHERE run_id = ?", (run_id,))
 
     def iter_discovered(self) -> Iterator[DiscoveredApp]:
         for row in self._db.execute("SELECT * FROM discovered ORDER BY appid"):

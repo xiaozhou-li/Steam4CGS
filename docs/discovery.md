@@ -90,7 +90,7 @@ Every app gets exactly one reason. The first matching rule in this order wins:
 `detail` gives the specific evidence, for example `type='dlc'` or
 `release_date='Q1 2021' precision=quarter interval=2021-01-01..2021-03-31 window=2020-01-01..2026-10-30`.
 
-## Outputs (`data/discovery/`, set with `--out`)
+## Outputs (`work/discovery/`, set with `--out`)
 
 All outputs are rewritten atomically at the end of every invocation,
 including interrupted ones.
@@ -109,7 +109,7 @@ failed. Pending apps appear only in `discovered.csv`.
 ## Checkpointing, `--limit`, `--resume`, incremental runs
 
 * **State** lives in a SQLite database (`--state`, default
-  `data/discovery/state.sqlite3`, ignored by git). Every catalog page and
+  `work/discovery.sqlite3`, ignored by git). Every catalog page and
   every lookup is its own transaction, so Ctrl-C loses at most the request
   in flight.
 * **`--limit N`** caps the number of appdetails lookups in one invocation. The

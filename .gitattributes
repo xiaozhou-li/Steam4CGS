@@ -1,0 +1,3 @@
+# Store CSV bytes exactly as written (CRLF line endings, like the original dataset).
+# Without this, core.autocrlf=input converts them to LF and breaks byte-exact checks.
+*.csv -text

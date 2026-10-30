@@ -143,6 +143,9 @@ class _Builder:
     def set(self, column: str, value: str, status: str, src: SourceResult, path: str, raw: Any = None,
             note: str = "") -> None:
         self.row[column] = value
+        if src.cached:
+            note = f"{note}; served from cache (retrieved_at is the original fetch)" if note else \
+                "served from cache (retrieved_at is the original fetch)"
         self.provenance.append(FieldProvenance(
             self.appid, column, value, status, f"{src.name}:{path}" if path else src.name, src.url,
             src.retrieved_at or "", _raw(raw), note))
@@ -316,7 +319,7 @@ def _map_tags(b: _Builder, tags: SourceResult, tag_names: Mapping[int, str] | No
 
 
 def _map_steamspy_tags(b: _Builder, src: SourceResult) -> list[dict[str, str]]:
-    cache_note = "; served from cache (retrieved_at is the original fetch)" if src.cached else ""
+    cache_note = ""  # _Builder.set appends the cache note
     if not src.ok:
         b.set("tags", "", SOURCE_UNAVAILABLE, src, "", None, (src.error or "") + "; genres are not substituted")
         return []

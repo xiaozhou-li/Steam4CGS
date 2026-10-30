@@ -121,8 +121,10 @@ class SampleSteam(BaseAdapter):
     """Serves the synthetic payloads above for the four endpoints the extractor uses."""
 
     def __init__(self, appdetails=None, reviews=None, tags=None, tag_names=None,
-                 review_params=REVIEW_METHOD_PARAMS, early_access=None, steamspy=None):
+                 review_params=REVIEW_METHOD_PARAMS, early_access=None, steamspy=None, catalog=None):
         super().__init__()
+        # GetAppList catalog: appid -> last_modified (default: every sample app).
+        self.catalog = dict(catalog) if catalog is not None else {a: 1_700_000_000 for a in APPDETAILS}
         self.early_access = dict(STORE_ITEM_EARLY_ACCESS if early_access is None else early_access)
         self.steamspy = dict(STEAMSPY if steamspy is None else steamspy)
         self.review_params = review_params  # None: GetAppReviews not listed
@@ -145,9 +147,25 @@ class SampleSteam(BaseAdapter):
         url = urlsplit(request.url)
         params = {k: v[-1] for k, v in parse_qs(url.query).items()}
         self.calls.append((url.path, params))
+        if url.path == "/IStoreService/GetAppList/v1/":
+            after, size = int(params.get("last_appid", 0)), int(params["max_results"])
+            since = int(params.get("if_modified_since", 0))
+            matching = [a for a in sorted(self.catalog) if a > after and self.catalog[a] > since]
+            page = matching[:size]
+            response = {"apps": [{"appid": a, "name": f"Catalog {a}", "last_modified": self.catalog[a],
+                                  "price_change_number": 1} for a in page]}
+            if len(matching) > size:
+                response["have_more_results"] = True
+            if page:
+                response["last_appid"] = page[-1]
+            return self._respond(request, 200, {"response": response})
         if url.path == "/api/appdetails":
             appid = int(params["appids"])
             data = self.appdetails.get(appid)
+            if isinstance(data, int):
+                return self._respond(request, data, {})
+            if isinstance(data, BaseException):
+                raise data
             entry = {"success": True, "data": data} if data is not None else {"success": False}
             return self._respond(request, 200, {str(appid): entry})
         if url.path == "/ISteamWebAPIUtil/GetSupportedAPIList/v1/":
@@ -166,6 +184,8 @@ class SampleSteam(BaseAdapter):
         if url.path == "/IStoreBrowseService/GetItems/v1/":
             appid = json.loads(params["input_json"])["ids"][0]["appid"]
             tags = self.tags.get(appid, [])
+            if isinstance(tags, BaseException):
+                raise tags
             if isinstance(tags, int):
                 return self._respond(request, tags, {})
             item = {"item_type": 0, "id": appid, "success": 1, "visible": True, "appid": appid,
@@ -201,7 +221,7 @@ def build_extractor(state, adapter: SampleSteam, legacy_ids=frozenset(), key=Non
 
     transport = make_transport(adapter, retry=RetryPolicy(max_attempts=1))
     steamspy = SteamSpyClient(transport, steamspy_cache, now=now) if tags_source == "steamspy" else None
-    return Extractor(state, web=SteamWebAPI(transport, key), store=SteamStoreAPI(transport),
+    return Extractor(state, web=SteamWebAPI(transport, key), store=SteamStoreAPI(transport, now=now),
                      legacy_ids=frozenset(legacy_ids), tags_source=tags_source, steamspy=steamspy,
                      now=now, log=lambda _: None)
 
