@@ -16,13 +16,13 @@ PUBLIC_ONLY = {"apilist": {"interfaces": [
     {"name": "ISteamNews", "methods": [{"name": "GetNewsForApp", "version": 2, "httpmethod": "GET", "parameters": []}]},
 ]}}
 APP_LIST = {"response": {"apps": [{"appid": 10, "name": "CS"}, {"appid": 20, "name": "TFC"}], "have_more_results": True, "last_appid": 20}}
-REVIEWS = {"response": {"review_score_desc": "Overwhelmingly Positive"}}
+REVIEWS = {"response": {"query_summary": {"review_score_desc": "Overwhelmingly Positive", "total_positive": 390000,
+                                           "total_negative": 10000, "total_reviews": 400000}}}
 DETAILS = {"620": {"success": True, "data": {"type": "game", "name": "Portal 2", "steam_appid": 620}}}
-SUMMARY = {"success": 1, "query_summary": {"review_score_desc": "Overwhelmingly Positive", "total_reviews": 400000}}
 ITEMS = {"response": {"store_items": [{"appid": 620, "success": 1, "tagids": [128, 1664]}]}}
 TAG_LIST = {"response": {"tags": [{"tagid": 128, "name": "Puzzle"}, {"tagid": 1664, "name": "Co-op"}]}}
-TAIL = (reply(body=SUMMARY), reply(body=ITEMS), reply(body=TAG_LIST))
-TAIL_PATHS = ["/appreviews/620", "/IStoreBrowseService/GetItems/v1/", "/IStoreService/GetTagList/v1/"]
+TAIL = (reply(body=ITEMS), reply(body=TAG_LIST))
+TAIL_PATHS = ["/IStoreBrowseService/GetItems/v1/", "/IStoreService/GetTagList/v1/"]
 
 
 @pytest.fixture
@@ -89,9 +89,11 @@ def test_live_with_key_runs_all_checks_within_budget(no_legacy):
     assert "IUserReviewsService/GetAppReviews/v1: listed, params=['key', 'appid']" in out
     assert "[ OK ] IStoreService/GetAppList/v1: 2 app(s) [10, 20]" in out
     assert "name='Portal 2'" in out
-    assert "review_score_desc='Overwhelmingly Positive'" in out
+    assert ("IUserReviewsService/GetAppReviews/v1: appid 620: status=ok, "
+            "review_score_desc='Overwhelmingly Positive', total_reviews=400000, params sent=[]") in out
+    assert fake.calls[2].params == {"appid": "620", "key": FAKE_KEY}  # only declared params are sent
     assert "2 tag id(s), 2 tag name(s); first ['Puzzle', 'Co-op']" in out
-    assert "live requests sent: 7" in out
+    assert "live requests sent: 6" in out
     assert tr.requests_sent <= preflight.LIVE_MAX_REQUESTS
     assert FAKE_KEY not in out
 
@@ -114,7 +116,6 @@ def test_live_reports_endpoint_failures_without_leaking_key(no_legacy):
         reply(403, text=f"denied {FAKE_KEY}"),
         reply(404, text="Not Found"),
         reply(body={"620": {"success": False}}),
-        reply(500, text="boom"), reply(500, text="boom"), reply(500, text="boom"),
         reply(body={"response": {"store_items": []}}), reply(body=TAG_LIST),
     )
     code, out, _ = run({ENV_VAR: FAKE_KEY}, fake, live=True, legacy_script=no_legacy)
@@ -122,7 +123,6 @@ def test_live_reports_endpoint_failures_without_leaking_key(no_legacy):
     assert "[FAIL] IStoreService/GetAppList/v1: SteamAuthError" in out
     assert "[FAIL] IUserReviewsService/GetAppReviews/v1: SteamHTTPError" in out
     assert "[WARN] store appdetails: appid 620: success=false" in out
-    assert "[FAIL] store appreviews summary: SteamHTTPError" in out
     assert "[WARN] IStoreBrowseService/GetItems + IStoreService/GetTagList: appid 620: 0 tag id(s)" in out
     assert FAKE_KEY not in out
 

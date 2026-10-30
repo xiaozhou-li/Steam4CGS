@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from crawler import reviews as rv
 from crawler import schema
 from crawler.release_dates import parse_release_date
 from crawler.steam_api import MAX_TAGS
@@ -25,13 +26,19 @@ MISSING = "missing"                        # source answered, but has no value f
 UNVERIFIED = "unverified"                  # the evidence needed to decide is missing
 UNRECOGNIZED = "unrecognized"              # source value exists but does not fit the contract
 SOURCE_UNAVAILABLE = "source_unavailable"  # the request for this source failed
+NOT_COLLECTED = "not_collected"            # no review summary has been collected for this app yet
+
+# Review-summary status -> provenance status for the sentiment column.
+_REVIEW_STATUS = {
+    rv.OK: PRESENT, rv.NO_REVIEWS: MISSING, rv.MISSING_LABEL: MISSING,
+    rv.UNRECOGNIZED_LABEL: UNRECOGNIZED, rv.INVALID_RESPONSE: UNRECOGNIZED, rv.API_ERROR: SOURCE_UNAVAILABLE,
+}
 
 EXPECTED_CURRENCY = "USD"
 PRICE_CONVERSION = (
     "price_overview.initial (regular listing price, USD cents) rounded to whole dollars, halves up; "
     "is_free=true -> 0; sale prices (final with discount_percent > 0) are never used"
 )
-NO_REVIEWS_DESC = "No user reviews"
 
 # The order in which spec labels appear in steamproducts2020.csv. It is
 # consistent across all 23,034 rows (tests/test_metadata.py re-derives it).
@@ -130,9 +137,9 @@ class _Builder:
 def normalize(
     appid: int,
     appdetails: SourceResult,
-    reviews: SourceResult,
     tags: SourceResult,
     tag_names: Mapping[int, str] | None,
+    review: rv.ReviewRecord | None = None,
 ) -> Extracted:
     if not appdetails.ok:
         raise ExtractionError(f"appdetails unavailable: {appdetails.error}")
@@ -220,7 +227,8 @@ def normalize(
     _map_price(b, ad, data)
 
     # sentiment ---------------------------------------------------------------------------------------
-    _map_sentiment(b, reviews)
+    b.provenance.append(sentiment_field(appid, review))
+    b.row["sentiment"] = b.provenance[-1].value
 
     # metascore ----------------------------------------------------------------------------------------
     metacritic = data.get("metacritic")
@@ -239,7 +247,8 @@ def normalize(
         raise ExtractionError(f"normalized row violates the schema: {exc}") from None
     by_field = {p.field: p for p in b.provenance}
     provenance = tuple(by_field[c] for c in schema.COLUMNS)
-    complete = all(p.status != SOURCE_UNAVAILABLE for p in provenance)
+    # Review summaries are collected separately (python -m crawler reviews), so they don't make a row partial.
+    complete = all(p.status != SOURCE_UNAVAILABLE for p in provenance if p.field != "sentiment")
     return Extracted(record, row, provenance, complete)
 
 
@@ -295,22 +304,29 @@ def _map_price(b: _Builder, ad: SourceResult, data: Mapping[str, Any]) -> None:
     b.set("price", str(schema.price_from_cents(cents)), PRESENT, ad, path, raw, f"{note}; {PRICE_CONVERSION}")
 
 
-def _map_sentiment(b: _Builder, reviews: SourceResult) -> None:
-    if not reviews.ok:
-        b.set("sentiment", "", SOURCE_UNAVAILABLE, reviews, "", None, reviews.error or "")
-        return
-    summary = reviews.data if isinstance(reviews.data, Mapping) else {}
-    desc, total = summary.get("review_score_desc"), summary.get("total_reviews")
-    raw = {k: summary.get(k) for k in ("review_score", "review_score_desc", "total_positive",
-                                       "total_negative", "total_reviews")}
-    try:
-        label = schema.decode_sentiment(desc) if isinstance(desc, str) else None
-    except ValueError:
-        label = None
-    if label:
-        b.set("sentiment", label, PRESENT, reviews, "query_summary.review_score_desc", raw)
-    elif desc == NO_REVIEWS_DESC or total == 0:
-        b.set("sentiment", "", MISSING, reviews, "query_summary.review_score_desc", raw, "no user reviews")
-    else:
-        b.set("sentiment", "", UNRECOGNIZED, reviews, "query_summary.review_score_desc", raw,
-              "label not in the legacy vocabulary; not guessed from counts")
+def sentiment_field(appid: int, review: rv.ReviewRecord | None) -> FieldProvenance:
+    """The sentiment cell and its provenance, taken only from a verified GetAppReviews record."""
+    if review is None:
+        return FieldProvenance(appid, "sentiment", "", NOT_COLLECTED, f"user_reviews:{rv.METHOD}", rv.ENDPOINT_URL, "",
+                               "", "no review summary collected; run: python -m crawler reviews")
+    raw = {k: getattr(review, k) for k in ("review_score_desc", "review_score", "total_positive",
+                                           "total_negative", "total_reviews")}
+    note = (f"status={review.status}; review_language={review.review_language}; "
+            f"purchase_type={review.purchase_type}")
+    if review.params_not_supported:
+        note += f"; not supported by the method: {review.params_not_supported}"
+    if review.detail:
+        note += f"; {review.detail}"
+    value = review.sentiment if review.status == rv.OK else ""
+    return FieldProvenance(appid, "sentiment", value, _REVIEW_STATUS[review.status],
+                           f"user_reviews:{rv.METHOD}.review_score_desc", review.source_url, review.retrieved_at,
+                           _raw(raw), note)
+
+
+def with_review(row: Mapping[str, str], provenance: Sequence[Mapping[str, str]],
+                review: rv.ReviewRecord | None) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Replace a stored row's sentiment (cell + provenance) with the latest review record."""
+    field_ = sentiment_field(int(row["id"]), review)
+    new_row = dict(row, sentiment=field_.value)
+    new_prov = [field_.as_row() if p["field"] == "sentiment" else dict(p) for p in provenance]
+    return new_row, new_prov

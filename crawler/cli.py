@@ -4,7 +4,9 @@
     python -m crawler discover  [--start DATE] [--end DATE] [--limit N] [--incremental]
                                 [--resume | --restart] [--recheck-unreleased] [--state PATH] [--out DIR]
     python -m crawler extract   [--input eligible.csv | --appid N ...] [--limit N] [--refresh]
-                                [--state PATH] [--out DIR]
+                                [--state PATH] [--out DIR] [--reviews-state PATH]
+    python -m crawler reviews   [--input eligible.csv | --appid N ...] [--limit N] [--refresh]
+                                [--language all] [--purchase-type all] [--state PATH] [--out DIR]
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from crawler import discovery, extract, preflight
+from crawler import reviews as rv
 from crawler.credentials import MissingCredentialError, InvalidCredentialError, load_api_key
 from crawler.discovery_state import DiscoveryState
 from crawler.eligibility import DateWindow
@@ -28,6 +31,8 @@ DEFAULT_OUT = ROOT / "data" / "discovery"
 DEFAULT_LEGACY_CSV = ROOT / "steamproducts2020.csv"
 DEFAULT_METADATA_STATE = ROOT / "data" / "metadata" / "state.sqlite3"
 DEFAULT_METADATA_OUT = ROOT / "data" / "metadata"
+DEFAULT_REVIEWS_STATE = ROOT / "data" / "reviews" / "state.sqlite3"
+DEFAULT_REVIEWS_OUT = ROOT / "data" / "reviews"
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_TEMPFAIL, EXIT_INTERRUPTED = 0, 1, 2, 75, 130
 
@@ -83,21 +88,79 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--out", type=Path, default=DEFAULT_METADATA_OUT,
                    help="directory for games.csv, provenance.csv and failed.csv")
     x.add_argument("--legacy-csv", type=Path, default=DEFAULT_LEGACY_CSV, help="original dataset (read-only)")
+    x.add_argument("--reviews-state", type=Path, default=DEFAULT_REVIEWS_STATE,
+                   help="review-summary state used for the sentiment column (default: %(default)s)")
+
+    r = sub.add_parser("reviews", help="collect game-level review summaries via IUserReviewsService/GetAppReviews")
+    rsrc = r.add_mutually_exclusive_group()
+    rsrc.add_argument("--input", type=Path, default=DEFAULT_OUT / "eligible.csv",
+                      help="eligible.csv from discovery (default: %(default)s)")
+    rsrc.add_argument("--appid", type=int, action="append", help="collect specific AppID(s) instead of --input")
+    r.add_argument("--limit", type=_non_negative, help="maximum summary requests in this invocation")
+    r.add_argument("--refresh", action="store_true", help="re-collect summaries that already exist")
+    r.add_argument("--language", default="all", help="review language setting (default: %(default)s)")
+    r.add_argument("--purchase-type", choices=rv.PURCHASE_TYPES, default="all",
+                   help="purchase-type setting (default: %(default)s)")
+    r.add_argument("--state", type=Path, default=DEFAULT_REVIEWS_STATE, help="SQLite checkpoint file")
+    r.add_argument("--out", type=Path, default=DEFAULT_REVIEWS_OUT, help="directory for review_summaries.csv")
+    r.add_argument("--legacy-csv", type=Path, default=DEFAULT_LEGACY_CSV, help="original dataset (read-only)")
     return parser
 
 
-def run_extract(args: argparse.Namespace, environ: Mapping[str, str], transport: SteamTransport | None = None) -> int:
+def _appids(args: argparse.Namespace) -> list[int] | None:
     if args.appid:
         if any(a <= 0 for a in args.appid):
             print("error: --appid must be positive")
-            return EXIT_USAGE
-        appids = args.appid
-    else:
+            return None
+        return args.appid
+    try:
+        return extract.read_eligible_appids(args.input)
+    except (OSError, ValueError) as exc:
+        print(f"error: cannot read {args.input}: {exc}")
+        return None
+
+
+def run_reviews(args: argparse.Namespace, environ: Mapping[str, str], transport: SteamTransport | None = None) -> int:
+    appids = _appids(args)
+    if appids is None:
+        return EXIT_USAGE
+    try:
+        settings = rv.ReviewSettings(language=args.language, purchase_type=args.purchase_type)
+        key = load_api_key(environ, required=False)
+    except (ValueError, InvalidCredentialError) as exc:
+        print(f"error: {exc}")
+        return EXIT_USAGE if not isinstance(exc, InvalidCredentialError) else EXIT_ERROR
+    legacy_ids = discovery.load_legacy_appids(args.legacy_csv)
+    transport = transport or SteamTransport()
+    code = EXIT_OK
+    with transport, rv.ReviewState(args.state) as state:
+        collector = rv.ReviewCollector(state, SteamWebAPI(transport, key), settings=settings, legacy_ids=legacy_ids)
+        report = None
         try:
-            appids = extract.read_eligible_appids(args.input)
-        except (OSError, ValueError) as exc:
-            print(f"error: cannot read {args.input}: {exc}")
-            return EXIT_USAGE
+            report = collector.run(appids, limit=args.limit, refresh=args.refresh)
+            if report.stop_reason == "rate_limited":
+                code = EXIT_TEMPFAIL
+        except (rv.ReviewEndpointUnavailable, SteamAuthError) as exc:
+            print(f"error: {exc}")
+            code = EXIT_ERROR
+        except SteamError as exc:
+            print(f"error: {type(exc).__name__}: {exc}")
+            code = EXIT_TEMPFAIL
+        except KeyboardInterrupt:
+            print("interrupted; progress is checkpointed")
+            code = EXIT_INTERRUPTED
+        counts = rv.export(state, args.out, settings)
+        print(f"exported to {args.out}: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
+        if report is not None:
+            print(f"{report.stop_reason}: {report.attempted} requested, {report.pending} pending, "
+                  + ", ".join(f"{k}={v}" for k, v in report.statuses.items() if v))
+    return code
+
+
+def run_extract(args: argparse.Namespace, environ: Mapping[str, str], transport: SteamTransport | None = None) -> int:
+    appids = _appids(args)
+    if appids is None:
+        return EXIT_USAGE
     try:
         key = load_api_key(environ, required=False)  # tag endpoints are sent the key only if one is set
     except InvalidCredentialError as exc:
@@ -117,7 +180,7 @@ def run_extract(args: argparse.Namespace, environ: Mapping[str, str], transport:
         except KeyboardInterrupt:
             print("interrupted; progress is checkpointed")
             code = EXIT_INTERRUPTED
-        counts = extract.export(state, args.out)
+        counts = extract.export(state, args.out, rv.load_records(args.reviews_state))
         print(f"exported to {args.out}: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
         if report is not None:
             print(f"{report.stop_reason}: {report.attempted} fetched, {report.extracted} complete, "
@@ -193,4 +256,6 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         return run_discover(args, environ)
     if args.command == "extract":
         return run_extract(args, environ)
+    if args.command == "reviews":
+        return run_reviews(args, environ)
     return EXIT_USAGE

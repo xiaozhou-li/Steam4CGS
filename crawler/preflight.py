@@ -16,6 +16,7 @@ from pathlib import Path
 
 import requests
 
+from crawler import reviews as rv
 from crawler.credentials import ENV_VAR, ApiKey, InvalidCredentialError, load_api_key
 from crawler.steam_api import SteamStoreAPI, SteamWebAPI
 from crawler.transport import RetryPolicy, SteamError, SteamTransport
@@ -23,7 +24,7 @@ from crawler.transport import RetryPolicy, SteamError, SteamTransport
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
 
 DEFAULT_LIVE_APPID = 620  # Portal 2: long-lived, has reviews and full store data
-LIVE_MAX_REQUESTS = 9
+LIVE_MAX_REQUESTS = 8
 LIVE_RETRY = RetryPolicy(max_attempts=2, backoff_base=2.0)
 
 REQUIRED_METHODS = (
@@ -109,9 +110,15 @@ def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> li
                            f"{len(page.apps)} app(s) [{sample}], have_more_results={page.have_more_results}")
 
     def reviews() -> CheckResult:
-        response = web.get_app_reviews(appid)
-        return CheckResult("IUserReviewsService/GetAppReviews/v1", OK,
-                           f"appid {appid}: response keys {sorted(response)}")
+        method = methods.get(("IUserReviewsService", "GetAppReviews", 1))
+        params = {k: v for k, v in rv.ReviewSettings().desired_params().items()
+                  if method is not None and k in method.parameters}
+        response = web.get_app_reviews(appid, **params)
+        v = rv.verify_summary(response)
+        return CheckResult("IUserReviewsService/GetAppReviews/v1", OK if v.status in (rv.OK, rv.NO_REVIEWS) else WARN,
+                           f"appid {appid}: status={v.status}, review_score_desc={v.review_score_desc!r}, "
+                           f"total_reviews={v.total_reviews}, params sent={sorted(params)}, "
+                           f"response keys={sorted(response)}" + (f"; {v.detail}" if v.detail else ""))
 
     def details() -> CheckResult:
         data = store.get_app_details(appid)
@@ -122,12 +129,6 @@ def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> li
                            f"appid {appid}: type={data.get('type')!r}, name={data.get('name')!r}, "
                            f"release_date={(data.get('release_date') or {}).get('date')!r}, "
                            f"currency={po.get('currency')!r}, {len(data)} fields")
-
-    def review_summary() -> CheckResult:
-        s = store.get_review_summary(appid)
-        return CheckResult("store appreviews summary", OK,
-                           f"appid {appid}: review_score_desc={s.get('review_score_desc')!r}, "
-                           f"total_reviews={s.get('total_reviews')}")
 
     def tags() -> CheckResult:
         ids = web.get_store_item_tags(appid)
@@ -150,7 +151,6 @@ def live_checks(key: ApiKey | None, appid: int, transport: SteamTransport) -> li
         attempt("IUserReviewsService/GetAppReviews/v1", reviews)
 
     attempt("store appdetails", details)
-    attempt("store appreviews summary", review_summary)
     attempt("IStoreBrowseService/GetItems + IStoreService/GetTagList", tags)
     return results
 

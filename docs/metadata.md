@@ -16,19 +16,18 @@ checkpoints and export). AppIDs in `steamproducts2020.csv` are refused.
 | Source | Request | Used for |
 |---|---|---|
 | Store `appdetails` (undocumented) | `store.steampowered.com/api/appdetails?appids=<id>&cc=us&l=english` | id, title, app_name, genres, developer, publisher, release_date, specs, price, early_access, metascore |
-| Store review summary (undocumented) | `store.steampowered.com/appreviews/<id>?json=1&language=all&purchase_type=all&review_type=all&num_per_page=0` | sentiment |
 | `IStoreBrowseService/GetItems/v1` | `api.steampowered.com`, `input_json` with `include_tag_count: 20`, `country_code: US`, `language: english` | tags (ids, most votes first) |
 | `IStoreService/GetTagList/v1` | `api.steampowered.com`, `language=english`, **once per invocation** | tag id to name |
+| Review-summary records from `python -m crawler reviews` | `IUserReviewsService/GetAppReviews/v1`, collected separately (see [reviews.md](reviews.md)) | sentiment, applied when `games.csv` is exported |
 
 * If `appdetails` fails or returns `success: false`, the app goes to
-  `failed.csv` and the other three requests are skipped.
+  `failed.csv` and the remaining requests are skipped.
 * `STEAM_API_KEY` is optional here. If it is set, it is sent only to
   `api.steampowered.com`.
-* **Why the review summary uses the Store endpoint.** Its `review_score_desc`
-  is exactly the text of the legacy `sentiment` column, including the
-  plural `1 user reviews`, and `steamreviewcrawler.py` used the same
-  endpoint. `IUserReviewsService/GetAppReviews` is not public, and its
-  response format is unverified (see `docs/steam_api.md`).
+* **`extract` never requests reviews.** Every export reads the review
+  state (`--reviews-state`, default `data/reviews/state.sqlite3`). Running
+  `extract` again after `reviews` refreshes `sentiment` with no new
+  requests for apps already extracted.
 
 ## Field mapping
 
@@ -43,7 +42,7 @@ checkpoints and export). AppIDs in `steamproducts2020.csv` are refused.
 | `specs` | Store categories: `categories[].description`. Labels known from the legacy file use its fixed order, which is consistent across all 23,034 rows (`SPEC_ORDER`). Other labels follow, in Steam's order, and are named in the provenance note. `Steam Achievements` appears exactly when Steam lists that category. `Single-player` is not added. | no categories |
 | `tags` | User tags: GetItems tag ids sorted by weight, then names from GetTagList, at most 20. Unknown ids are skipped, and the note lists them. **Genres are never substituted.** | no store item, no tags, or a source failed |
 | `price` | See [Price](#price). | not free and no usable regular USD price |
-| `sentiment` | `query_summary.review_score_desc` verbatim, if it is one of the 9 legacy labels or `N user reviews` (N = 1–9). It is never derived from scores or counts. | `No user reviews`, total 0, an unrecognized label, or the request failed |
+| `sentiment` | `review_score_desc` from a **verified** `GetAppReviews` record (`status=ok`; see [reviews.md](reviews.md)), used verbatim. It is never derived from scores or counts. | not collected yet, no reviews, missing or unrecognized label, a response that failed verification, or an API error |
 | `early_access` | `TRUE` if `Early Access` is among the genres, `FALSE` if genres are present without it. User tags are not used. | `unverified`: no genres |
 | `metascore` | `metacritic.score` if it is an int from 0 to 100 | no `metacritic`, or an invalid score |
 
@@ -85,6 +84,7 @@ rounding inferred from the legacy file (`docs/legacy_schema.md` §3.2).
 | `unverified` | The evidence to decide is missing (only `early_access`) |
 | `unrecognized` | A value exists but doesn't fit the contract (unknown sentiment label, non-USD currency, invalid score) |
 | `source_unavailable` | The request for that source failed |
+| `not_collected` | No review summary collected yet (only `sentiment`) |
 
 More about provenance fields:
 
@@ -105,8 +105,9 @@ order:
 
 Complete AppIDs are fetched again only with `--refresh`. An HTTP 429 that
 survives retries stops the invocation (exit 75) without marking the app.
-At the default request spacing, each app costs about 4.5 s: 2 Store
-requests at 1.5 s and 1 Web API request at 1 s.
+At the default request spacing, each app costs about 2.5 s: 1 Store
+request at 1.5 s and 1 Web API request at 1 s. Review summaries add
+about 1 s per game, in `python -m crawler reviews`.
 
 ## Known differences from the legacy file
 
@@ -126,11 +127,10 @@ requests at 1.5 s and 1 Web API request at 1 s.
 
 ## Not verified live
 
-No live extraction has been run. The response shapes parsed for the review
-summary, GetItems (`store_items[].tags[].{tagid, weight}` / `tagids`) and
-GetTagList (`tags[].{tagid, name}`) follow those endpoints as publicly
+No live extraction has been run. The response shapes parsed for GetItems
+(`store_items[].tags[].{tagid, weight}` / `tagids`) and GetTagList (`tags[].{tagid, name}`) follow those endpoints as publicly
 described. To check them, run `python -m crawler preflight --live`
-(at most 9 requests). Parsing is defensive: an unexpected shape is
+(at most 8 requests). Parsing is defensive: an unexpected shape is
 recorded as `source_unavailable` for that field, not guessed.
 
 ## Sample output
@@ -145,5 +145,10 @@ committed files go stale. The four apps cover:
 * a sale price;
 * a free Early Access game with 3 reviews;
 * a sparse record with blanks and `unverified`;
-* a failed tags request;
-* one `success: false` app, which goes to `failed.sample.csv`.
+* a failed tags request, plus a review response that fails verification
+  (a score label with 9 reviews), so `sentiment` is blank;
+* one `success: false` app, which goes to `failed.sample.csv`. Its review
+  request also fails, which gives `api_error`.
+
+`review_summaries.sample.csv` and `review_summaries.meta.sample.json` show
+the review collector's output for the same apps.

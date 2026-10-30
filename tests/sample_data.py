@@ -77,16 +77,21 @@ APPDETAILS = {
     9900005: None,  # success=false
 }
 
+# GetAppReviews responses (the "response" object), one per review outcome.
 REVIEWS = {
-    9900001: {"review_score": 8, "review_score_desc": "Very Positive", "total_positive": 1100,
-              "total_negative": 134, "total_reviews": 1234},
-    9900002: {"review_score": 0, "review_score_desc": "3 user reviews", "total_positive": 3,
-              "total_negative": 0, "total_reviews": 3},
-    9900003: {"review_score": 0, "review_score_desc": "No user reviews", "total_positive": 0,
-              "total_negative": 0, "total_reviews": 0},
-    9900004: {"review_score": 6, "review_score_desc": "Mostly Positive", "total_positive": 70,
-              "total_negative": 20, "total_reviews": 90},
+    9900001: {"query_summary": {"review_score": 8, "review_score_desc": "Very Positive", "total_positive": 1100,
+                                "total_negative": 134, "total_reviews": 1234}},
+    9900002: {"query_summary": {"review_score": 0, "review_score_desc": "3 user reviews", "total_positive": 3,
+                                "total_negative": 0, "total_reviews": 3}},
+    9900003: {"query_summary": {"review_score": 0, "review_score_desc": "No user reviews", "total_positive": 0,
+                                "total_negative": 0, "total_reviews": 0}},
+    # Inconsistent: a score label with fewer than 10 reviews -> invalid_response, sentiment blank.
+    9900004: {"query_summary": {"review_score": 6, "review_score_desc": "Positive", "total_positive": 8,
+                                "total_negative": 1, "total_reviews": 9}},
+    9900005: 503,  # API failure
 }
+
+REVIEW_METHOD_PARAMS = ["key", "appid", "language", "purchase_type", "num_per_page"]
 
 STORE_ITEM_TAGS = {
     9900001: [{"tagid": 492, "weight": 300}, {"tagid": 19, "weight": 250}, {"tagid": 999999, "weight": 200},
@@ -100,8 +105,10 @@ STORE_ITEM_TAGS = {
 class SampleSteam(BaseAdapter):
     """Serves the synthetic payloads above for the four endpoints the extractor uses."""
 
-    def __init__(self, appdetails=None, reviews=None, tags=None, tag_names=None):
+    def __init__(self, appdetails=None, reviews=None, tags=None, tag_names=None,
+                 review_params=REVIEW_METHOD_PARAMS):
         super().__init__()
+        self.review_params = review_params  # None: GetAppReviews not listed
         self.appdetails = dict(APPDETAILS if appdetails is None else appdetails)
         self.reviews = dict(REVIEWS if reviews is None else reviews)
         self.tags = dict(STORE_ITEM_TAGS if tags is None else tags)
@@ -126,12 +133,19 @@ class SampleSteam(BaseAdapter):
             data = self.appdetails.get(appid)
             entry = {"success": True, "data": data} if data is not None else {"success": False}
             return self._respond(request, 200, {str(appid): entry})
-        if url.path.startswith("/appreviews/"):
-            appid = int(url.path.rsplit("/", 1)[1])
-            summary = self.reviews.get(appid)
+        if url.path == "/ISteamWebAPIUtil/GetSupportedAPIList/v1/":
+            interfaces = [{"name": "IStoreService", "methods": [
+                {"name": "GetTagList", "version": 1, "httpmethod": "GET", "parameters": [{"name": "language"}]}]}]
+            if self.review_params is not None:
+                interfaces.append({"name": "IUserReviewsService", "methods": [
+                    {"name": "GetAppReviews", "version": 1, "httpmethod": "GET",
+                     "parameters": [{"name": n} for n in self.review_params]}]})
+            return self._respond(request, 200, {"apilist": {"interfaces": interfaces}})
+        if url.path == "/IUserReviewsService/GetAppReviews/v1/":
+            summary = self.reviews.get(int(params["appid"]), {})
             if isinstance(summary, int):
                 return self._respond(request, summary, {})
-            return self._respond(request, 200, {"success": 1, "query_summary": summary or {}, "reviews": []})
+            return self._respond(request, 200, {"response": summary})
         if url.path == "/IStoreBrowseService/GetItems/v1/":
             appid = json.loads(params["input_json"])["ids"][0]["appid"]
             tags = self.tags.get(appid, [])
@@ -163,14 +177,33 @@ def build_extractor(state, adapter: SampleSteam, legacy_ids=frozenset(), key=Non
                      legacy_ids=frozenset(legacy_ids), now=lambda: FIXED_NOW, log=lambda _: None)
 
 
-def write_samples(out_dir: Path, state_path: Path) -> dict[str, int]:
+def build_collector(state, adapter: SampleSteam, legacy_ids=frozenset(), key=None, settings=None):
+    from fakes import make_transport
+
+    from crawler import reviews as rv
+    from crawler.steam_api import SteamWebAPI
+    from crawler.transport import RetryPolicy
+
+    transport = make_transport(adapter, retry=RetryPolicy(max_attempts=1))
+    return rv.ReviewCollector(state, SteamWebAPI(transport, key), settings=settings or rv.ReviewSettings(),
+                              legacy_ids=frozenset(legacy_ids), now=lambda: FIXED_NOW, log=lambda _: None)
+
+
+def write_samples(out_dir: Path, state_dir: Path) -> dict[str, int]:
+    from crawler import reviews as rv
     from crawler.extract import ExtractionState, export
 
-    with ExtractionState(state_path) as state:
-        build_extractor(state, SampleSteam()).run(sorted(APPDETAILS))
-        counts = export(state, out_dir)
-    for name in ("games", "provenance", "prices", "failed"):
+    adapter = SampleSteam()
+    with rv.ReviewState(state_dir / "reviews.sqlite3") as rstate:
+        build_collector(rstate, adapter).run(sorted(APPDETAILS))
+        rv.export(rstate, out_dir, rv.ReviewSettings())
+        records = rstate.records()
+    with ExtractionState(state_dir / "extract.sqlite3") as state:
+        build_extractor(state, adapter).run(sorted(APPDETAILS))
+        counts = export(state, out_dir, records)
+    for name in ("games", "provenance", "prices", "failed", "review_summaries"):
         (out_dir / f"{name}.csv").rename(out_dir / f"{name}.sample.csv")
+    (out_dir / "review_summaries.meta.json").rename(out_dir / "review_summaries.meta.sample.json")
     return counts
 
 
@@ -181,4 +214,4 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
-        print(write_samples(SAMPLES_DIR, Path(tmp) / "state.sqlite3"))
+        print(write_samples(SAMPLES_DIR, Path(tmp)))

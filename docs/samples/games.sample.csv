@@ -2,4 +2,4 @@ id,title,genres,developer,publisher,release_date,app_name,specs,tags,price,senti
 9900001,Sample: Kestrel &amp; Crow,"['Action', 'Adventure', 'Indie']","Sample Studio, Port House (Mac)",Example Publishing,"14 Mar, 2023",Sample: Kestrel & Crow,"['Single-player', 'Multi-player', 'Steam Achievements', 'Full controller support', 'Steam Cloud', 'Family Sharing']","['Indie', 'Action', 'Point & Click', 'Adventure']",20,Very Positive,FALSE,84
 9900002,Sample Sandbox,"['Free to Play', 'Indie', 'Simulation', 'Early Access']",Sample Sandbox Team,Sample Sandbox Team,"2 Feb, 2024",Sample Sandbox,"['Single-player', 'Online Co-op', 'Co-op']","['Early Access', 'Survival', 'Indie']",0,3 user reviews,TRUE,
 9900003,Sample Puzzle &lt;Deluxe&gt;,,,,Q3 2022,Sample Puzzle <Deluxe>,,,,,,
-9900004,Sample Racer,"['Casual', 'Racing']",Sample Motorworks,Sample Motorworks,"10 Dec, 2021",Sample Racer,"['Single-player', 'Steam Achievements']",,10,Mostly Positive,FALSE,
+9900004,Sample Racer,"['Casual', 'Racing']",Sample Motorworks,Sample Motorworks,"10 Dec, 2021",Sample Racer,"['Single-player', 'Steam Achievements']",,10,,FALSE,

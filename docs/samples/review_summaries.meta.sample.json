@@ -1,0 +1,28 @@
+{
+  "declared_parameters": [
+    "appid",
+    "key",
+    "language",
+    "num_per_page",
+    "purchase_type"
+  ],
+  "endpoint": "IUserReviewsService/GetAppReviews/v1",
+  "http_method": "GET",
+  "requested_params": {
+    "language": "all",
+    "num_per_page": 0,
+    "purchase_type": "all"
+  },
+  "settings": {
+    "language": "all",
+    "purchase_type": "all"
+  },
+  "statuses": {
+    "api_error": 1,
+    "invalid_response": 1,
+    "missing_label": 0,
+    "no_reviews": 1,
+    "ok": 2,
+    "unrecognized_label": 0
+  }
+}

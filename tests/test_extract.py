@@ -7,10 +7,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fakes import FAKE_KEY
-from sample_data import APPDETAILS, SAMPLES_DIR, SampleSteam, build_extractor, write_samples
+from sample_data import APPDETAILS, SAMPLES_DIR, SampleSteam, build_collector, build_extractor, write_samples
 
 from crawler import cli, extract, schema
 from crawler import metadata as m
+from crawler import reviews as rv
 from crawler.credentials import ApiKey
 from crawler.extract import ExtractionState
 
@@ -26,10 +27,17 @@ def read(path):
         return list(csv.DictReader(f))
 
 
+def collect_reviews(tmp_path, adapter, appids):
+    with rv.ReviewState(tmp_path / "reviews.sqlite3") as rstate:
+        build_collector(rstate, adapter).run(appids)
+        return rstate.records()
+
+
 def test_end_to_end_outputs(state, tmp_path):
     adapter = SampleSteam()
+    records = collect_reviews(tmp_path, adapter, sorted(APPDETAILS))
     report = build_extractor(state, adapter).run(sorted(APPDETAILS))
-    counts = extract.export(state, tmp_path / "out")
+    counts = extract.export(state, tmp_path / "out", records)
     assert counts == {"games": 4, "provenance_rows": 52, "failed": 1}
     assert (report.extracted, report.partial, report.failed, report.pending) == (3, 1, 1, 0)
 
@@ -50,6 +58,7 @@ def test_end_to_end_outputs(state, tmp_path):
             sparse["early_access"], sparse["sentiment"], sparse["release_date"]) == ("", "", "", "", "", "", "", "Q3 2022")
     assert games[9900004]["tags"] == ""  # tags request failed; genres not substituted
     assert games[9900004]["genres"] == "['Casual', 'Racing']"
+    assert games[9900004]["sentiment"] == ""  # its review response failed verification
 
     (failure,) = read(tmp_path / "out" / "failed.csv")
     assert (failure["appid"], failure["error"]) == ("9900005", "store_details_unavailable")
@@ -76,9 +85,7 @@ def test_requests_per_app_and_single_tag_list(state):
     assert paths.count("/IStoreBrowseService/GetItems/v1/") == 2
     appdetails = [q for p, q in adapter.calls if p == "/api/appdetails"]
     assert all(q["cc"] == "us" and q["l"] == "english" for q in appdetails)
-    reviews = [q for p, q in adapter.calls if p.startswith("/appreviews/")]
-    assert all(q == {"json": "1", "language": "all", "purchase_type": "all", "review_type": "all",
-                     "num_per_page": "0"} for q in reviews)
+    assert not any("Reviews" in p or "appreviews" in p for p in paths)  # extract never fetches reviews
 
 
 def test_failed_appdetails_skips_other_sources(state):
@@ -139,8 +146,8 @@ def test_api_key_never_reaches_provenance(state, tmp_path):
     assert FAKE_KEY not in text and "key=" not in text
     items = [q for p, q in adapter.calls if p == "/IStoreBrowseService/GetItems/v1/"]
     assert items[0]["key"] == FAKE_KEY  # the key is sent to the Web API host when configured...
-    stores = [q for p, q in adapter.calls if p == "/api/appdetails" or p.startswith("/appreviews/")]
-    assert all("key" not in q for q in stores)  # ...and never to the store host
+    stores = [q for p, q in adapter.calls if p == "/api/appdetails"]
+    assert stores and all("key" not in q for q in stores)  # ...and never to the store host
 
 
 def test_provenance_source_urls_are_reproducible(state):
@@ -148,7 +155,7 @@ def test_provenance_source_urls_are_reproducible(state):
     (_, provenance), = state.rows()
     urls = {p["field"]: p["source_url"] for p in provenance}
     assert urls["price"] == "https://store.steampowered.com/api/appdetails?appids=9900001&cc=us&l=english"
-    assert urls["sentiment"].startswith("https://store.steampowered.com/appreviews/9900001?json=1")
+    assert urls["sentiment"] == rv.ENDPOINT_URL  # not collected yet
     tag_query = parse_qs(urlsplit(urls["tags"]).query)
     assert '"appid":9900001' in tag_query["input_json"][0]
 
@@ -160,7 +167,8 @@ def test_cli_extract(tmp_path, capsys):
     eligible = tmp_path / "eligible.csv"
     eligible.write_text("appid,name\r\n9900002,Sample Sandbox\r\n9900001,Sample\r\n9900002,dup\r\n", encoding="utf-8")
     args = cli.build_parser().parse_args(["extract", "--input", str(eligible), "--state", str(tmp_path / "s.sqlite3"),
-                                          "--out", str(tmp_path / "out")])
+                                          "--out", str(tmp_path / "out"),
+                                          "--reviews-state", str(tmp_path / "none.sqlite3")])
     transport = make_transport(SampleSteam(), retry=RetryPolicy(max_attempts=1))
     assert cli.run_extract(args, {}, transport=transport) == 0
     out = capsys.readouterr().out
@@ -177,7 +185,8 @@ def test_cli_extract_missing_input(tmp_path, capsys):
 def test_committed_samples_are_up_to_date(tmp_path):
     out = tmp_path / "samples"
     out.mkdir()
-    write_samples(out, tmp_path / "state.sqlite3")
-    for name in ("games.sample.csv", "provenance.sample.csv", "prices.sample.csv", "failed.sample.csv"):
+    write_samples(out, tmp_path)
+    for name in ("games.sample.csv", "provenance.sample.csv", "prices.sample.csv", "failed.sample.csv",
+                 "review_summaries.sample.csv", "review_summaries.meta.sample.json"):
         assert (out / name).read_bytes() == (SAMPLES_DIR / name).read_bytes(), (
             f"docs/samples/{name} is stale; regenerate with: python3.13 tests/sample_data.py")

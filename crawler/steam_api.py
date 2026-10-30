@@ -37,13 +37,6 @@ def appdetails_request(appid: int, country: str, language: str) -> tuple[str, di
     return f"{STORE_BASE}/api/appdetails", {"appids": appid, "cc": country, "l": language}
 
 
-def review_summary_request(appid: int) -> tuple[str, dict]:
-    # num_per_page=0 returns only query_summary; language/purchase_type=all is the store's "All Reviews".
-    return f"{STORE_BASE}/appreviews/{appid}", {
-        "json": 1, "language": "all", "purchase_type": "all", "review_type": "all", "num_per_page": 0,
-    }
-
-
 def store_items_request(appid: int, country: str, language: str, tag_count: int = MAX_TAGS) -> tuple[str, dict]:
     payload = {
         "ids": [{"appid": appid}],
@@ -310,15 +303,3 @@ class SteamStoreAPI:
         if success is not True:
             raise SteamResponseError(f"appdetails[{appid}] has no boolean 'success'")
         return _expect_dict(entry.get("data"), f"appdetails[{appid}] 'data'")
-
-    def get_review_summary(self, appid: int) -> dict:
-        """``query_summary`` from ``/appreviews/<appid>?json=1&num_per_page=0`` (undocumented).
-
-        Its ``review_score_desc`` is the store's review label, e.g.
-        ``'Very Positive'``, ``'3 user reviews'`` or ``'No user reviews'``.
-        """
-        url, params = review_summary_request(_check_appid(appid))
-        body = _expect_dict(self._transport.get_json(url, params), f"appreviews[{appid}]")
-        if body.get("success") != 1:
-            raise SteamResponseError(f"appreviews[{appid}] reported success={body.get('success')!r}")
-        return _expect_dict(body.get("query_summary"), f"appreviews[{appid}] 'query_summary'")

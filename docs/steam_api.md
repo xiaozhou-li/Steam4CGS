@@ -6,7 +6,7 @@ The endpoint clients live in [`crawler/steam_api.py`](../crawler/steam_api.py).
 | Purpose | Endpoint | Host | Key | Client method |
 |---|---|---|---|---|
 | Game discovery | `IStoreService/GetAppList/v1` | `api.steampowered.com` | required | `SteamWebAPI.get_app_list`, `iter_app_list` |
-| Review summaries | `IUserReviewsService/GetAppReviews/v1` | `api.steampowered.com` | sent if set | `SteamWebAPI.get_app_reviews` |
+| Review summaries | `IUserReviewsService/GetAppReviews/v1` | `api.steampowered.com` | sent if set | `SteamWebAPI.get_app_reviews`, used by `crawler/reviews.py` (see `docs/reviews.md`) |
 | Detailed metadata | `/api/appdetails` (undocumented) | `store.steampowered.com` | **never sent** | `SteamStoreAPI.get_app_details` |
 | Capability check | `ISteamWebAPIUtil/GetSupportedAPIList/v1` | `api.steampowered.com` | sent if set | `SteamWebAPI.get_supported_methods` |
 
@@ -44,7 +44,7 @@ rejects any host outside the allowlist.
 | Backoff | Exponential (1, 2, 4 … s, capped at 60 s) with jitter |
 | `Retry-After` | Honoured, in seconds or as an HTTP date. If the server asks for more than 300 s, the client raises instead of waiting. |
 | Rate limiting | Minimum interval per host: 1.0 s for `api.steampowered.com`, 1.5 s for `store.steampowered.com`. Thread-safe. A 429 or 5xx pushes back every caller using that host. |
-| Request budget | Optional `max_requests`, counting retries. Preflight uses 9. |
+| Request budget | Optional `max_requests`, counting retries. Preflight uses 8. |
 | Not retried | 401/403 (raised as `SteamAuthError` on keyed calls), other 4xx, 3xx, non-JSON bodies |
 
 The error hierarchy is `SteamError`, with these subclasses:
@@ -93,7 +93,7 @@ reported to throttle at around 200 requests per 5 minutes, either with HTTP
 
 ```sh
 python -m crawler preflight          # offline: Python, requests, STEAM_API_KEY format, legacy-key warning
-python -m crawler preflight --live   # plus at most 9 requests, one app id (default 620)
+python -m crawler preflight --live   # plus at most 8 requests, one app id (default 620)
 ```
 
 Live checks run only with `--live`. They make one capability check, one
@@ -113,9 +113,11 @@ These results come from a keyless `--live` run, which sent 2 requests:
   * GetAppReviews is therefore **not public**. Whether a regular (non-partner)
     Web API key can see it is still **unverified**. Run
     `preflight --live` with `STEAM_API_KEY` set to find out.
-  * If the method isn't visible to a regular key, the documented public
-    alternative is `store.steampowered.com/appreviews/<appid>?json=1&num_per_page=0`.
-    Its `query_summary.review_score_desc` is the same text as the legacy
-    `sentiment` column. This is what `steamreviewcrawler.py` used.
+  * The review collector (`docs/reviews.md`) uses only this method. If the
+    method isn't visible to the key, the collector stops and does not fall
+    back. The public Store page endpoint
+    `store.steampowered.com/appreviews/<appid>?json=1&num_per_page=0`, which
+    `steamreviewcrawler.py` used, would be an alternative only if you
+    explicitly choose it; it is not implemented.
 * **The keyed endpoints were not exercised.** `STEAM_API_KEY` was not set, and
   the key in `steamreviewcrawler.py` was deliberately not used.

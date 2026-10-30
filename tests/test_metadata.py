@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import collections
 import copy
+import dataclasses
 import csv
 import graphlib
 import ast
@@ -11,6 +11,7 @@ import ast
 import pytest
 
 from crawler import metadata as m
+from crawler import reviews as rv
 from crawler import schema
 from crawler.metadata import ExtractionError, SourceResult, normalize
 
@@ -40,14 +41,28 @@ def src(name, data=None, error=None):
     return SourceResult(name, f"https://store.steampowered.com/{name}", AT, data=data, error=error)
 
 
-def run(data=None, *, reviews=None, tags=(492, 19), tag_names=TAGS, reviews_error=None, tags_error=None):
+def review_record(response, appid=10):
+    """A ReviewRecord built the way the collector builds it: from a verified GetAppReviews response."""
+    v = rv.verify_summary(response)
+    return rv.ReviewRecord(
+        appid=appid, status=v.status, sentiment=v.sentiment, review_score_desc=v.review_score_desc,
+        review_score=v.review_score, total_positive=v.total_positive, total_negative=v.total_negative,
+        total_reviews=v.total_reviews, review_language="all", purchase_type="all",
+        params_sent=f"appid={appid};language=all;num_per_page=0;purchase_type=all", params_not_supported="",
+        source_url=f"{rv.ENDPOINT_URL}?appid={appid}", retrieved_at=AT, detail=v.detail)
+
+
+VERY_POSITIVE = {"query_summary": {"review_score": 8, "review_score_desc": "Very Positive",
+                                   "total_positive": 450, "total_negative": 50, "total_reviews": 500}}
+
+
+def run(data=None, *, review=..., tags=(492, 19), tag_names=TAGS, tags_error=None):
     return normalize(
         10,
         src("appdetails", details() if data is None else data),
-        src("appreviews", {"review_score_desc": "Very Positive", "total_reviews": 500} if reviews is None else reviews,
-            reviews_error),
         src("store_items", list(tags) if tags is not None else None, tags_error),
         tag_names,
+        review_record(VERY_POSITIVE) if review is ... else review,
     )
 
 
@@ -86,12 +101,12 @@ def test_full_mapping():
 def test_unbuildable_rows_raise(data, message):
     appdetails = src("appdetails", data) if data is not None else src("appdetails", None)
     with pytest.raises(ExtractionError, match=message):
-        normalize(10, appdetails, src("appreviews", {}), src("store_items", []), TAGS)
+        normalize(10, appdetails, src("store_items", []), TAGS)
 
 
 def test_appdetails_request_failure_raises():
     with pytest.raises(ExtractionError, match="unavailable"):
-        normalize(10, src("appdetails", error="SteamHTTPError: 500"), src("appreviews", {}), src("store_items", []), TAGS)
+        normalize(10, src("appdetails", error="SteamHTTPError: 500"), src("store_items", []), TAGS)
 
 
 # --- title / app_name ---------------------------------------------------------------------
@@ -293,25 +308,52 @@ def test_sale_price_is_recorded_but_not_used():
     assert "sale price ignored" in p.note and m.PRICE_CONVERSION in p.note
 
 
-# --- sentiment --------------------------------------------------------------------------------------------------
+# --- sentiment ---------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("label", list(schema.SENTIMENT_LABELS) + ["1 user reviews", "9 user reviews"])
-def test_sentiment_uses_store_label_verbatim(label):
-    r = run(reviews={"review_score_desc": label, "total_reviews": 1})
-    assert cell(r, "sentiment") == label and prov(r, "sentiment").status == m.PRESENT
+def test_sentiment_comes_from_the_review_record():
+    p = prov(run(), "sentiment")
+    assert (p.value, p.status) == ("Very Positive", m.PRESENT)
+    assert p.source == "user_reviews:GetAppReviews.review_score_desc"
+    assert p.source_url.startswith(rv.ENDPOINT_URL) and p.retrieved_at == AT
+    assert "review_language=all" in p.note and "purchase_type=all" in p.note
+
+
+def test_sentiment_is_blank_until_collected():
+    r = run(review=None)
+    assert cell(r, "sentiment") == "" and prov(r, "sentiment").status == m.NOT_COLLECTED
+    assert r.complete  # a missing review summary does not make the row partial
 
 
 @pytest.mark.parametrize(
-    ("reviews", "error", "status"),
-    [({"review_score_desc": "No user reviews", "total_reviews": 0}, None, m.MISSING),
-     ({"total_reviews": 0}, None, m.MISSING),
-     ({"review_score_desc": "Très positives", "total_reviews": 50}, None, m.UNRECOGNIZED),
-     ({"review_score": 8, "total_positive": 90, "total_negative": 10, "total_reviews": 100}, None, m.UNRECOGNIZED),
-     ({}, "SteamHTTPError: 502", m.SOURCE_UNAVAILABLE)],
+    ("response", "status"),
+    [({"query_summary": {"review_score_desc": "No user reviews", "total_positive": 0, "total_negative": 0,
+                         "total_reviews": 0}}, m.MISSING),
+     ({"query_summary": {"total_positive": 40, "total_negative": 10, "total_reviews": 50}}, m.MISSING),
+     ({"query_summary": {"review_score_desc": "Très positives", "total_positive": 40, "total_negative": 10,
+                         "total_reviews": 50}}, m.UNRECOGNIZED),
+     ({"query_summary": {"review_score_desc": "Very Positive", "total_positive": 4, "total_negative": 1,
+                         "total_reviews": 5}}, m.UNRECOGNIZED),
+     ({}, m.UNRECOGNIZED)],
 )
-def test_sentiment_is_never_fabricated(reviews, error, status):
-    r = run(reviews=reviews, reviews_error=error)
+def test_unverified_review_records_leave_sentiment_blank(response, status):
+    r = run(review=review_record(response))
     assert cell(r, "sentiment") == "" and prov(r, "sentiment").status == status
+
+
+def test_api_error_record_is_source_unavailable():
+    record = dataclasses.replace(review_record(VERY_POSITIVE), status=rv.API_ERROR, sentiment="",
+                                 detail="SteamHTTPError: 503")
+    r = run(review=record)
+    assert cell(r, "sentiment") == "" and prov(r, "sentiment").status == m.SOURCE_UNAVAILABLE
+
+
+def test_with_review_replaces_only_sentiment():
+    r = run(review=None)
+    rows = [p.as_row() for p in r.provenance]
+    row, prov_rows = m.with_review(r.row, rows, review_record(VERY_POSITIVE))
+    assert row == dict(r.row, sentiment="Very Positive")
+    changed = [(a, b) for a, b in zip(rows, prov_rows) if a != b]
+    assert [b["field"] for _, b in changed] == ["sentiment"]
 
 
 # --- metascore ---------------------------------------------------------------------------------------------------
@@ -334,12 +376,13 @@ def test_provenance_records_source_time_and_raw_values():
         assert p.appid == 10 and p.retrieved_at == AT and p.source_url.startswith("https://")
         assert p.value == r.row[p.field]
     assert prov(r, "metascore").raw == '{"score": 77, "url": "https://example.invalid/m"}'
-    assert prov(r, "sentiment").source == "appreviews:query_summary.review_score_desc"
+    assert prov(r, "sentiment").source == "user_reviews:GetAppReviews.review_score_desc"
 
 
 def test_provenance_statuses_cover_missing_fields():
     sparse = details(genres=..., developers=..., publishers=..., categories=..., price_overview=..., metacritic=...)
-    r = run(sparse, reviews={"review_score_desc": "No user reviews", "total_reviews": 0}, tags=[])
+    r = run(sparse, review=review_record({"query_summary": {"review_score_desc": "No user reviews",
+                                         "total_positive": 0, "total_negative": 0, "total_reviews": 0}}), tags=[])
     blanks = {p.field: p.status for p in r.provenance if p.value == ""}
     assert blanks == {
         "genres": m.MISSING, "developer": m.MISSING, "publisher": m.MISSING, "specs": m.MISSING, "tags": m.MISSING,

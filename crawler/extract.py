@@ -1,9 +1,11 @@
 """Fetch and normalize Store metadata for eligible AppIDs.
 
-For each AppID: Store ``appdetails`` (core fields), Store ``appreviews``
-summary (sentiment) and ``IStoreBrowseService/GetItems`` (user tag ids; names
-from one ``IStoreService/GetTagList`` call per invocation). Results are
-checkpointed per app in SQLite; exports are regenerated from that state:
+For each AppID: Store ``appdetails`` (core fields) and
+``IStoreBrowseService/GetItems`` (user tag ids; names from one
+``IStoreService/GetTagList`` call per invocation). ``sentiment`` is filled at
+export time from verified GetAppReviews records (crawler.reviews), never
+fetched here. Results are checkpointed per app in SQLite; exports are
+regenerated from that state:
 
 * ``games.csv``       legacy 13-column format, validated by crawler.schema
 * ``provenance.csv``  one row per (appid, field): raw value, source URL, time, status
@@ -32,13 +34,14 @@ from crawler.metadata import (
     FieldProvenance,
     SourceResult,
     normalize,
+    with_review,
 )
+from crawler.reviews import ReviewRecord
 from crawler.steam_api import (
     SteamStoreAPI,
     SteamWebAPI,
     appdetails_request,
     public_url,
-    review_summary_request,
     store_items_request,
     tag_list_request,
 )
@@ -195,11 +198,10 @@ class Extractor:
         if details.data is None:
             self.state.fail(appid, "store_details_unavailable", "appdetails returned success=false", self._now())
             return None
-        reviews = self._source("appreviews", review_summary_request(appid), lambda: self.store.get_review_summary(appid))
         tags = self._source("store_items", store_items_request(appid, cc, lang),
                             lambda: self.web.get_store_item_tags(appid, country=cc, language=lang))
         try:
-            extracted = normalize(appid, details, reviews, tags, self._load_tag_names())
+            extracted = normalize(appid, details, tags, self._load_tag_names())
         except ExtractionError as exc:
             self.state.fail(appid, "normalization_error", str(exc), self._now())
             return None
@@ -265,11 +267,16 @@ def price_row(price: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def export(state: ExtractionState, out_dir: str | Path) -> dict[str, int]:
-    """Write games.csv (legacy format), provenance.csv, prices.csv and failed.csv."""
+def export(state: ExtractionState, out_dir: str | Path,
+           reviews: Mapping[int, ReviewRecord] | None = None) -> dict[str, int]:
+    """Write games.csv (legacy format), provenance.csv, prices.csv and failed.csv.
+
+    ``sentiment`` comes only from ``reviews`` (verified GetAppReviews records).
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    stored = state.rows()
+    reviews = reviews or {}
+    stored = [with_review(row, prov, reviews.get(int(row["id"]))) for row, prov in state.rows()]
     games_tmp = out / ".games.csv.tmp"
     schema.write_rows(games_tmp, [row for row, _ in stored], overwrite=True)
     os.replace(games_tmp, out / "games.csv")
