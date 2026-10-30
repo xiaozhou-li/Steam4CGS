@@ -122,7 +122,7 @@ quality` at field level). The checks cover:
 * an unchanged original CSV (sha256
   `3a7b7bd5b59565440d05c543557607b498c45590ebddc3f3e7a77afe9d095be8`).
 
-**Test suite.** 664 tests, offline, with sockets blocked. They use mocked
+**Test suite.** 731 tests, offline, with sockets blocked. They use mocked
 Steam responses through a fake `requests` adapter.
 
 | Area | Files (tests) |
@@ -133,6 +133,7 @@ Steam responses through a fake `requests` adapter.
 | Stages | `test_discovery` (29), `test_extract` (14), `test_pipeline` (28), `test_backtest` (14) |
 | Failure scenarios | `test_resilience` (32): HTTP 5xx, connection errors, 429 (transient, persistent and over-long `Retry-After`), malformed JSON and HTML, wrong shapes, missing fields, and interruptions in the catalog, discovery, crawl, reviews and export. Each scenario must recover to byte-identical outputs and pass every quality check. |
 | Output checks | `test_quality` (26): each defect class is planted and must be caught |
+| Achievements | `test_achievements` (67): parsing, the unavailable-vs-zero matrix, statistics and thresholds, retries, 429s, interruption, isolation from the 13-column outputs |
 
 Planted bugs (mutation checks) were used to confirm that the key tests fail
 when the behaviour they guard is broken.
@@ -188,7 +189,28 @@ the seeds, not the Steam catalog.
 * **Software heuristic.** Games whose only genres are software genres (for
   example `Education`) are excluded as software; the reason is recorded.
 
-## 10. Reproducibility
+## 10. Achievement variables
+
+`python -m crawler achievements` collects achievement data. It uses the
+Store summary, the official `ISteamUserStats/GetSchemaForGame/v2` (with a
+key) and `GetGlobalAchievementPercentagesForApp/v2`. The results go into
+separate files and never into the 13-column data
+([achievements.md](achievements.md)).
+
+* **Zero needs explicit evidence.** As with Early Access, absence is never
+  zero. `has_steam_achievements` is `FALSE` only when a source explicitly
+  reports none, and a 403, a missing field or a failed request leaves it
+  blank.
+* **Count precedence.** The count prefers the official schema, then the
+  percentage list, then the Store summary. The source is recorded, and the
+  Store and percentage counts are cross-checked in the coverage report.
+* **Rarity, not difficulty.** The unlock-percentage statistics (mean,
+  median, minimum, shares below 10% and 1%) describe **observed rarity**
+  among owners at `snapshot_utc`. They are not intrinsic difficulty,
+  because ownership without play, audience composition, playtime and
+  optional or hidden achievements all lower the percentages.
+
+## 11. Reproducibility
 
 * **Inputs.** The original CSV is pinned by its sha256. `export` refuses to
   run if it differs.

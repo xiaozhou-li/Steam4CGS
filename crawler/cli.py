@@ -12,6 +12,8 @@ Pipeline commands (shared workspace: --base-dir, --work-dir, --legacy-csv):
     python -m crawler run       (discover + crawl + export + validate; all of the options above)
     python -m crawler backtest  [--sample N] [--seed S] [--appid N ...] [--refresh]
     python -m crawler quality   [--run-tests]
+    python -m crawler achievements [--scope new|legacy|merged | --appid N ... | --appids-file F] [--limit N]
+                                [--refresh] [--dry-run]
 
 Lower-level tools: ``extract`` and ``reviews`` (see docs/metadata.md, docs/reviews.md).
 """
@@ -19,6 +21,7 @@ Lower-level tools: ``extract`` and ``reviews`` (see docs/metadata.md, docs/revie
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import json
 import os
@@ -28,10 +31,12 @@ from pathlib import Path
 import subprocess
 import sys
 
-from crawler import backtest, discovery, extract, pipeline, preflight, quality
+from crawler import achievements, backtest, discovery, extract, pipeline, preflight, quality
 from crawler import reviews as rv
 from crawler import steamspy as spy
+from crawler.cache import ResponseCache
 from crawler.credentials import InvalidCredentialError, load_api_key
+from crawler.discovery_state import iso
 from crawler.eligibility import DateWindow
 from crawler.metadata import TAG_SOURCES, TAGS_STEAM, TAGS_STEAMSPY
 from crawler.steam_api import SteamStoreAPI, SteamWebAPI
@@ -157,6 +162,17 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--run-tests", action="store_true", help="run the offline test suite and include the result")
     q.add_argument("--out", type=Path, help="report path (default: BASE/reports/quality_report.md)")
 
+    ach = sub.add_parser("achievements", help="achievement-system variables (separate from the 13-column data)")
+    _workspace_args(ach)
+    target = ach.add_mutually_exclusive_group()
+    target.add_argument("--scope", choices=("new", "legacy", "merged"), default="merged",
+                        help="new games, original games, or both (default: %(default)s)")
+    target.add_argument("--appid", type=int, action="append", help="collect these AppIDs only")
+    target.add_argument("--appids-file", type=Path, help="one AppID per line ('#' comments allowed)")
+    ach.add_argument("--limit", type=_non_negative, help="maximum games fetched in this invocation")
+    ach.add_argument("--refresh", action="store_true", help="re-collect games already collected")
+    ach.add_argument("--dry-run", action="store_true", help="show what would happen; no requests, no writes")
+
     x = sub.add_parser("extract", help="(lower level) fetch and normalize Store metadata for AppIDs")
     src = x.add_mutually_exclusive_group()
     src.add_argument("--input", type=Path, default=DEFAULT_OUT / "eligible.csv",
@@ -232,6 +248,8 @@ def run_pipeline_command(args: argparse.Namespace, environ: Mapping[str, str],
             return run_backtest(ctx, args)
         if cmd == "quality":
             return run_quality(ctx, args)
+        if cmd == "achievements":
+            return run_achievements(ctx, args)
         if cmd == "validate":
             return pipeline.run_stage(ctx, "validate", lambda: pipeline.validate(ctx))
         if cmd == "export":
@@ -381,6 +399,60 @@ def run_backtest(ctx: pipeline.Context, args: argparse.Namespace) -> int:
         return EXIT_OK if s["rows_valid"] == s["extracted"] else EXIT_ERROR
 
     return pipeline.run_stage(ctx, "backtest", go)
+
+
+def _new_appids(ws: pipeline.Workspace, legacy_ids: frozenset[int]) -> list[int]:
+    if ws.new_csv.exists():
+        with open(ws.new_csv, newline="", encoding="utf-8") as f:
+            return [int(r["id"]) for r in csv.DictReader(f)]
+    return pipeline.eligible_appids(ws, legacy_ids)[0]
+
+
+def run_achievements(ctx: pipeline.Context, args: argparse.Namespace) -> int:
+    ws = ctx.ws
+    legacy_ids = ctx.legacy_ids()
+    new_ids = _new_appids(ws, legacy_ids)
+    if args.appid or args.appids_file:
+        appids = args.appid or read_appids_file(args.appids_file)
+        scope = "explicit AppIDs"
+    else:
+        scope = args.scope
+        appids = {"new": new_ids, "legacy": sorted(legacy_ids), "merged": sorted(legacy_ids) + new_ids}[scope]
+    state_path = ws.work / "achievements.sqlite3"
+    if args.dry_run:
+        done = set()
+        if state_path.exists():
+            with achievements.AchievementState(state_path) as st:
+                done = {a for a, r in st.records().items() if not r.needs_retry}
+        todo = [a for a in appids if args.refresh or a not in done]
+        n = min(len(todo), args.limit) if args.limit is not None else len(todo)
+        print(f"dry run: scope {scope}: {len(appids)} game(s), {len(todo)} to collect, {n} this time "
+              f"(up to 3 requests each: appdetails unless cached, GetSchemaForGame with a key, global percentages)")
+        return EXIT_OK
+
+    def go() -> int:
+        key = ctx.key()
+        transport = ctx.get_transport()
+        with ResponseCache(ws.appdetails_cache) as cache, achievements.AchievementState(state_path) as st:
+            collector = achievements.AchievementCollector(st, SteamWebAPI(transport, key), pipeline._store(ctx, cache),
+                                                          now=ctx.now)
+            report = collector.run(appids, limit=args.limit, refresh=args.refresh)
+            exported = achievements.export(st, ws.base, ws.work)
+        groups = {f"New games ({pipeline.NEW_CSV})": new_ids, "Original games (steamproducts2020.csv)": sorted(legacy_ids)}
+        if scope == "explicit AppIDs":
+            groups = {"Requested AppIDs": appids, **groups}
+        report_md = achievements.coverage_markdown(exported, groups, generated_at=iso(ctx.now()),
+                                                   key_available=key is not None)
+        pipeline._atomic_write_bytes(ws.base / "reports" / "achievements_coverage.md", report_md.encode())
+        print(f"achievements {report.stop_reason}: {report.attempted} collected this run, {report.pending} pending; "
+              f"wrote {achievements.FEATURES_CSV} ({len(exported['features'])} games), "
+              f"{achievements.PER_ACHIEVEMENT_CSV} ({len(exported['per_achievement'])} rows), "
+              "reports/achievements_coverage.md")
+        ctx.last_summary = {"scope": scope, "attempted": report.attempted, "pending": report.pending,
+                            "statuses": report.statuses, "requests_sent": transport.requests_sent}
+        return EXIT_TEMPFAIL if report.stop_reason == "rate_limited" else EXIT_OK
+
+    return pipeline.run_stage(ctx, "achievements", go)
 
 
 def run_quality(ctx: pipeline.Context, args: argparse.Namespace) -> int:

@@ -1,6 +1,6 @@
 # Data quality report
 
-Generated 2026-10-30T04:54:13Z by `python -m crawler quality` from the files on disk. Git commit: `cedca8dbc1e08ab2372040b219d7c7cf1caa0fba`.
+Generated 2026-10-30T05:32:20Z by `python -m crawler quality` from the files on disk. Git commit: `cedca8dbc1e08ab2372040b219d7c7cf1caa0fba`.
 
 * **Window:** 2020-01-01 to 2026-10-30
 * **Discovery mode:** `seed`
@@ -153,7 +153,7 @@ Interpretation: a game that matches only rounding (for example 1999 cents, recor
 ## Test suite
 
 ```
-python -m pytest -q: 664 passed in 112.00s (0:01:52) (exit code 0)
+python -m pytest -q: 731 passed in 118.07s (0:01:58) (exit code 0)
 ```
 
 ## Reproduce

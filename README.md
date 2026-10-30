@@ -28,10 +28,11 @@ python -m crawler run --appids-file F    # seed mode: specific AppIDs, no key ne
 Validation and reports:
 
 ```sh
-python3.13 -m pytest                          # 664 offline tests (mocked Steam APIs, sockets blocked)
+python3.13 -m pytest                          # 731 offline tests (mocked Steam APIs, sockets blocked)
 python3.13 -m crawler validate                # re-check the outputs against the contract
 python3.13 -m crawler backtest --sample 25    # live: re-extract 25 original games, compare structure
 python3.13 -m crawler quality --run-tests     # writes reports/quality_report.md
+python3.13 -m crawler achievements --scope new   # achievement variables (docs/achievements.md)
 ```
 
 Documentation: [data dictionary](docs/data_dictionary.md), [methodology](docs/methodology.md),

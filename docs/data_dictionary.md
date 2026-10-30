@@ -115,10 +115,24 @@ retried with `--resume`.
 | `metadata/early_access.csv` | `appid, early_access, status (true/false/unknown), reason, store_item_is_early_access, genres_early_access, store_item_url, store_item_retrieved_at, appdetails_url, appdetails_retrieved_at` |
 | `reviews/review_summaries.csv` | `appid, status, sentiment, review_score_desc, review_score, total_positive, total_negative, total_reviews, review_language, purchase_type, params_sent, params_not_supported, source_url, retrieved_at, detail` |
 
-## 6. Reports
+## 6. Achievement datasets (outside the 13-column format)
+
+These are described fully in [achievements.md](achievements.md).
+
+| File | Grain | Columns |
+|---|---|---|
+| `steam_achievements_features.csv` | one row per game | `appid, snapshot_utc, has_steam_achievements, achievement_count, achievement_count_source, global_unlock_percentages_available, mean_global_unlock_pct, median_global_unlock_pct, min_global_unlock_pct, share_below_10pct, share_below_1pct` |
+| `steam_achievements_per_achievement.csv` | one row per (game, achievement) | `appid, snapshot_utc, achievement_api_name, display_name, hidden, in_schema, global_unlock_pct, pct_source` |
+| `work/achievements/achievement_sources.csv` | one row per game | per source: status, count, URL, retrieval time; `conflict`; `detail` |
+
+A blank means unknown; `FALSE`/`0` means a source explicitly reported no
+achievements. Unlock percentages measure observed rarity, not difficulty.
+
+## 7. Reports
 
 | File | Contents |
 |---|---|
 | `reports/quality_report.md` | Validation checks, coverage, missingness, exclusions, failures, back-test and limitations (generated) |
 | `reports/backtest_comparison.csv` | `appid, stratum, column, legacy_value, current_value, compatible, equal, current_status, note` (one row per back-tested game and column) |
 | `reports/backtest_summary.json` | Aggregates used by the quality report |
+| `reports/achievements_coverage.md` | Achievement-data coverage per group, source statuses, count agreement (generated) |

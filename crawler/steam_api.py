@@ -52,6 +52,14 @@ def tag_list_request(language: str) -> tuple[str, dict]:
     return f"{WEB_API_BASE}/IStoreService/GetTagList/v1/", {"language": language}
 
 
+def schema_for_game_request(appid: int, language: str = "english") -> tuple[str, dict]:
+    return f"{WEB_API_BASE}/ISteamUserStats/GetSchemaForGame/v2/", {"appid": appid, "l": language}
+
+
+def global_achievement_percentages_request(appid: int) -> tuple[str, dict]:
+    return f"{WEB_API_BASE}/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/", {"gameid": appid}
+
+
 def _param(value: Any) -> Any:
     # The Web API expects lowercase booleans.
     return ("true" if value else "false") if isinstance(value, bool) else value
@@ -253,6 +261,19 @@ class SteamWebAPI:
         if item is None:
             return None
         return [tagid for tagid, _ in store_item_tag_weights(item)]
+
+    # -- achievements ----------------------------------------------------------------
+
+    def get_schema_for_game(self, appid: int, *, language: str = "english") -> dict:
+        """``ISteamUserStats/GetSchemaForGame/v2`` raw body (key required)."""
+        _, params = schema_for_game_request(_check_appid(appid), language)
+        return _expect_dict(self.call("ISteamUserStats", "GetSchemaForGame", 2, params), "GetSchemaForGame")
+
+    def get_global_achievement_percentages(self, appid: int) -> dict:
+        """``ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2`` raw body (no key needed)."""
+        _, params = global_achievement_percentages_request(_check_appid(appid))
+        body = self.call("ISteamUserStats", "GetGlobalAchievementPercentagesForApp", 2, params, require_key=False)
+        return _expect_dict(body, "GetGlobalAchievementPercentagesForApp")
 
     def get_tag_names(self, *, language: str = "english") -> dict[int, str]:
         """``IStoreService/GetTagList/v1``: tag id -> localized tag name."""

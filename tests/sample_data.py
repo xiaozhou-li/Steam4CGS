@@ -117,12 +117,37 @@ STEAMSPY = {
 }
 
 
+def _ach(name, pct):
+    return {"name": name, "percent": pct}
+
+
+# GetSchemaForGame bodies (only served when a key is sent) and global percentages.
+SCHEMAS = {
+    9900001: {"game": {"gameName": "Sample: Kestrel & Crow", "gameVersion": "3", "availableGameStats": {
+        "achievements": [{"name": f"ACH_{i}", "defaultvalue": 0, "displayName": f"Feat {i}", "hidden": int(i == 3),
+                          "description": "", "icon": "", "icongray": ""} for i in range(1, 5)]}}},
+    9900003: {"game": {"gameName": "Sample Puzzle <Deluxe>", "gameVersion": "1",
+                       "availableGameStats": {"stats": [{"name": "plays", "defaultvalue": 0}]}}},  # explicit zero
+}
+PERCENTAGES = {
+    9900001: {"achievementpercentages": {"achievements": [
+        _ach("ACH_1", 71.2), _ach("ACH_2", "9.5"), _ach("ACH_3", 0.8), _ach("ACH_4", 0.1)]}},
+    9900003: {"achievementpercentages": {"achievements": []}},  # explicit: no achievements
+    9900004: 500,                                                  # endpoint failure -> unknown
+    # 9900002: no entry -> HTTP 403 (not available)
+}
+
+
 class SampleSteam(BaseAdapter):
     """Serves the synthetic payloads above for the four endpoints the extractor uses."""
 
     def __init__(self, appdetails=None, reviews=None, tags=None, tag_names=None,
-                 review_params=REVIEW_METHOD_PARAMS, early_access=None, steamspy=None, catalog=None):
+                 review_params=REVIEW_METHOD_PARAMS, early_access=None, steamspy=None, catalog=None,
+                 schemas=None, percentages=None):
         super().__init__()
+        # ISteamUserStats fixtures: appid -> body (dict), HTTP status (int) or exception.
+        self.schemas = dict(SCHEMAS if schemas is None else schemas)
+        self.percentages = dict(PERCENTAGES if percentages is None else percentages)
         # GetAppList catalog: appid -> last_modified (default: every sample app).
         self.catalog = dict(catalog) if catalog is not None else {a: 1_700_000_000 for a in APPDETAILS}
         # Failure injection: callables (path, params) -> Response | (status, body) | bytes | None.
@@ -224,6 +249,19 @@ class SampleSteam(BaseAdapter):
             if isinstance(body, int):
                 return self._respond(request, body, {})
             return self._respond(request, 200, body)
+        if url.path in ("/ISteamUserStats/GetSchemaForGame/v2/",
+                        "/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/"):
+            schema_call = "GetSchemaForGame" in url.path
+            if schema_call and "key" not in params:
+                return self._respond(request, 403, {})
+            appid = int(params["appid" if schema_call else "gameid"])
+            table = self.schemas if schema_call else self.percentages
+            answer = table.get(appid, 403)
+            if isinstance(answer, BaseException):
+                raise answer
+            if isinstance(answer, int):
+                return self._respond(request, answer, {})
+            return self._respond(request, 200, answer)
         if url.path == "/IStoreService/GetTagList/v1/":
             if isinstance(self.tag_names, int):
                 return self._respond(request, self.tag_names, {})
