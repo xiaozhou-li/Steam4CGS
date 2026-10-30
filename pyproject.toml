@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "steam4cgs-crawler"
+version = "0.1.0"
+description = "Collect Steam game metadata compatible with the legacy steamproducts2020.csv schema"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["crawler"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
